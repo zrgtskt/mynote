@@ -163,7 +163,13 @@ pub fn extract(html: &str, page_url: &str, normalized_url: &str) -> NewItem {
     }
 }
 
-pub async fn fetch(http: &reqwest::Client, raw_url: &str) -> Result<NewItem> {
+/// 取得した記事と、リダイレクト後の URL
+pub struct Fetched {
+    pub item: NewItem,
+    pub final_url: String,
+}
+
+pub async fn fetch(http: &reqwest::Client, raw_url: &str) -> Result<Fetched> {
     let normalized = normalize_url(raw_url)?;
     let resp = http
         .get(&normalized)
@@ -198,7 +204,10 @@ pub async fn fetch(http: &reqwest::Client, raw_url: &str) -> Result<NewItem> {
         bail!("ページが大きすぎます（{} MB）", bytes.len() / 1024 / 1024);
     }
     let html = decode_html(&bytes, content_type.as_deref());
-    Ok(extract(&html, &final_url, &normalized))
+    Ok(Fetched {
+        item: extract(&html, &final_url, &normalized),
+        final_url,
+    })
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 import { memo } from "react";
-import { Bookmark, Heart, Link2, Play, Sparkles } from "lucide-react";
+import { Bookmark, BookOpenCheck, Heart, Link2, Play, Sparkles } from "lucide-react";
 import { mediaSrc } from "../api";
 import { compactNumber, hostOf, relativeTime } from "../lib/format";
-import type { Item } from "../types";
+import type { Item, LinkCard, LinkedPage } from "../types";
 import { Avatar, RichText, SiteBadge, openExternal } from "./common";
 
 interface Props {
@@ -32,6 +32,28 @@ export function Sources({ item }: { item: Item }) {
           <Link2 />
         </span>
       )}
+    </div>
+  );
+}
+
+/** ポストが紹介しているリンク。紹介先ページを保存済みなら「保存済み」を表示する */
+export function LinkPreview({ link, linked, onClick }: { link: LinkCard; linked?: LinkedPage | null; onClick?: (e: React.MouseEvent) => void }) {
+  const image = mediaSrc(link.imageLocal ?? linked?.imageLocal, link.image ?? linked?.imageUrl);
+  const saved = !!linked?.hasContent;
+  return (
+    <div className="link-card" onClick={onClick} title={saved ? "紹介先のページはローカルに保存済みです" : link.url}>
+      {image && <img src={image} alt="" loading="lazy" />}
+      <div className="link-card-body" style={image ? undefined : { paddingLeft: 12 }}>
+        <div className="link-card-host">
+          {linked?.siteName ?? hostOf(linked?.url ?? link.url)}
+          {saved && (
+            <span className="saved-badge">
+              <BookOpenCheck /> 保存済み
+            </span>
+          )}
+        </div>
+        <div className="link-card-title">{link.title ?? linked?.title ?? link.url}</div>
+      </div>
     </div>
   );
 }
@@ -137,19 +159,16 @@ function ItemCardInner({ item, terms = [], activeTags, onOpen, onTag, style }: P
           </div>
           <MediaGrid item={item} />
           {!item.media.length && item.link && (
-            <div
-              className="link-card"
+            <LinkPreview
+              link={item.link}
+              linked={item.linked}
               onClick={(e) => {
+                // 保存済みなら詳細（保存した本文）を開き、未保存なら元のページを開く
+                if (item.linked?.hasContent) return;
                 e.stopPropagation();
                 openExternal(item.link!.url);
               }}
-            >
-              {item.link.image && <img src={item.link.image} alt="" loading="lazy" />}
-              <div className="link-card-body" style={item.link.image ? undefined : { paddingLeft: 12 }}>
-                <div className="link-card-host">{hostOf(item.link.url)}</div>
-                <div className="link-card-title">{item.link.title ?? item.link.url}</div>
-              </div>
-            </div>
+            />
           )}
         </>
       )}

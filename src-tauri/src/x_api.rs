@@ -489,16 +489,31 @@ fn expand_text(text: &str, entities: Option<&Entities>) -> String {
     out.trim().to_string()
 }
 
+/// X 自身（ポストやプロフィール）へのリンクか
+pub fn is_x_url(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .map(|h| {
+            let h = h.trim_start_matches("www.").trim_start_matches("mobile.");
+            matches!(h, "x.com" | "twitter.com" | "t.co" | "pic.twitter.com" | "pic.x.com")
+        })
+        .unwrap_or(false)
+}
+
+/// ポストが紹介している外部リンク。プレビュー情報があるものを優先し、なければ最初の外部リンク。
 fn link_card(entities: Option<&Entities>) -> Option<LinkCard> {
     let ent = entities?;
-    ent.urls
+    let external: Vec<&UrlEntity> = ent
+        .urls
         .iter()
         .filter(|u| u.media_key.is_none())
-        .filter(|u| {
-            let e = u.expanded_url.as_deref().unwrap_or("");
-            !(e.contains("x.com/") || e.contains("twitter.com/"))
-        })
+        .filter(|u| !is_x_url(u.expanded_url.as_deref().unwrap_or(&u.url)))
+        .collect();
+    external
+        .iter()
         .find(|u| u.title.is_some() || !u.images.is_empty())
+        .or(external.first())
         .map(|u| LinkCard {
             url: u
                 .unwound_url
@@ -513,6 +528,7 @@ fn link_card(entities: Option<&Entities>) -> Option<LinkCard> {
                 .iter()
                 .max_by_key(|i| i.width.unwrap_or(0))
                 .map(|i| i.url.clone()),
+            image_local: None,
         })
 }
 
@@ -667,8 +683,32 @@ fn oembed_to_item(html: &str, author_name: Option<String>, author_url: Option<St
         author_handle: handle,
         site_name: Some("X".into()),
         text: frag,
+        link: oembed_link(html),
         ..Default::default()
     }
+}
+
+/// oEmbed の本文にある外部リンク（t.co）を紹介先として取り出す。画像・ハッシュタグ・メンションは除く。
+fn oembed_link(html: &str) -> Option<LinkCard> {
+    let mut rest = html;
+    while let Some(i) = rest.find("<a href=\"") {
+        rest = &rest[i + 9..];
+        let href_end = rest.find('"')?;
+        let href = &rest[..href_end];
+        let text_start = rest.find('>')? + 1;
+        let text_end = rest[text_start..].find("</a>")? + text_start;
+        let text = &rest[text_start..text_end];
+        rest = &rest[text_end..];
+        let is_pic = text.starts_with("pic.twitter.com") || text.starts_with("pic.x.com");
+        let is_x_page = href.contains("://twitter.com/") || href.contains("://x.com/");
+        if !is_pic && !is_x_page && href.starts_with("http") {
+            return Some(LinkCard {
+                url: href.replace("&amp;", "&"),
+                ..Default::default()
+            });
+        }
+    }
+    None
 }
 
 /// oEmbed の blockquote から本文（最初の <p>）をテキストとして取り出す
@@ -786,6 +826,33 @@ mod tests {
     }
 
     #[test]
+    fn link_without_preview_is_still_kept() {
+        let json = r#"{
+          "data": [{"id": "9", "text": "読んだ https://t.co/a と https://t.co/b", "author_id": "1",
+            "entities": {"urls": [
+              {"url": "https://t.co/a", "expanded_url": "https://x.com/someone/status/1"},
+              {"url": "https://t.co/b", "expanded_url": "https://www.box.com/blog/post"}
+            ]}}],
+          "includes": {"users": [{"id": "1", "name": "n", "username": "u"}]}
+        }"#;
+        let (items, _) = parse_page(json).unwrap();
+        let card = items[0].link.as_ref().unwrap();
+        assert_eq!(
+            card.url, "https://www.box.com/blog/post",
+            "x.com へのリンクは除き、box.com は除かない"
+        );
+        assert!(card.title.is_none());
+    }
+
+    #[test]
+    fn detects_x_urls_by_host() {
+        assert!(is_x_url("https://x.com/a/status/1"));
+        assert!(is_x_url("https://mobile.twitter.com/a"));
+        assert!(!is_x_url("https://www.box.com/x.com/"));
+        assert!(!is_x_url("https://netflix.com/"));
+    }
+
+    #[test]
     fn parses_empty_page() {
         let (items, next) = parse_page(r#"{"meta": {"result_count": 0}}"#).unwrap();
         assert!(items.is_empty() && next.is_none());
@@ -828,6 +895,11 @@ mod tests {
         let html = r#"<blockquote class="twitter-tweet"><p lang="ja" dir="ltr">こんにちは<br>世界 &amp; <a href="https://t.co/x">https://t.co/x</a></p>&mdash; 名前 (@name) <a href="https://twitter.com/name/status/1">Sep 1, 2026</a></blockquote>"#;
         let item = oembed_to_item(html, Some("名前".into()), Some("https://twitter.com/name".into()), "1");
         assert_eq!(item.text, "こんにちは\n世界 & https://t.co/x");
+        assert_eq!(
+            item.link.as_ref().map(|l| l.url.as_str()),
+            Some("https://t.co/x"),
+            "本文のリンクを紹介先にする"
+        );
         assert_eq!(item.author_handle.as_deref(), Some("name"));
         assert_eq!(item.url, "https://x.com/name/status/1");
     }

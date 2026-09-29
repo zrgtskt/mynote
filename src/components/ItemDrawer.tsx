@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { Check, ExternalLink, LoaderCircle, MessageSquareText, Newspaper, Repeat2, Heart, Sparkles, StickyNote, Tag, Trash2, X } from "lucide-react";
+import { BookOpen, Check, ExternalLink, Heart, LoaderCircle, MessageSquareText, Newspaper, Repeat2, RotateCw, Sparkles, StickyNote, Tag, Trash2, X } from "lucide-react";
 import { api, errorMessage, mediaSrc } from "../api";
 import { compactNumber, hostOf, longDate } from "../lib/format";
 import type { ItemDetail, TagCount } from "../types";
 import { Avatar, RichText, SiteBadge, openExternal } from "./common";
-import { Sources } from "./ItemCard";
+import { LinkPreview, Sources } from "./ItemCard";
 import { TagEditor } from "./TagEditor";
 
 interface Props {
@@ -23,11 +23,14 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
   const [note, setNote] = useState("");
   const [retagging, setRetagging] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [refetching, setRefetching] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     let alive = true;
     setItem(null);
     setConfirmDelete(false);
+    setExpanded(false);
     api
       .getItem(id)
       .then((it) => {
@@ -84,6 +87,33 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
       toast("error", errorMessage(e));
     } finally {
       setRetagging(false);
+    }
+  };
+
+  const refetchLinked = async () => {
+    if (!item) return;
+    setRefetching(true);
+    try {
+      const updated = await api.refetchLinked(item.id);
+      setItem(updated);
+      toast("success", "紹介先のページを保存しました");
+      onChanged();
+    } catch (e) {
+      toast("error", errorMessage(e));
+      // 失敗の理由を表示するため読み直す
+      api.getItem(item.id).then((it) => it && setItem(it)).catch(() => undefined);
+    } finally {
+      setRefetching(false);
+    }
+  };
+
+  /** 記事本文内のリンクはアプリ内で開かず、ブラウザで開く */
+  const openLinksExternally = (e: React.MouseEvent) => {
+    const a = (e.target as HTMLElement).closest("a");
+    if (a) {
+      e.preventDefault();
+      const href = a.getAttribute("href");
+      if (href) openExternal(href);
     }
   };
 
@@ -188,13 +218,8 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
               )}
 
               {!isArticle && item.link && (
-                <div className="link-card" style={{ cursor: "pointer" }} onClick={() => openExternal(item.link!.url)}>
-                  {item.link.image && <img src={item.link.image} alt="" />}
-                  <div className="link-card-body" style={item.link.image ? undefined : { paddingLeft: 12 }}>
-                    <div className="link-card-host">{hostOf(item.link.url)}</div>
-                    <div className="link-card-title">{item.link.title ?? item.link.url}</div>
-                    {item.link.description && <div className="muted" style={{ fontSize: 12 }}>{item.link.description}</div>}
-                  </div>
+                <div style={{ cursor: "pointer" }}>
+                  <LinkPreview link={item.link} linked={item.linked} onClick={() => openExternal(item.link!.url)} />
                 </div>
               )}
 
@@ -243,6 +268,71 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
                 />
               </div>
 
+              {!isArticle && item.link && (
+                <div className="detail-section">
+                  <div className="section-label">
+                    <BookOpen /> 紹介先の記事
+                  </div>
+                  {item.linked?.hasContent ? (
+                    <div className="linked-box">
+                      <div className="linked-head">
+                        {mediaSrc(item.linked.imageLocal, item.linked.imageUrl) && <img src={mediaSrc(item.linked.imageLocal, item.linked.imageUrl)} alt="" />}
+                        <div style={{ minWidth: 0 }}>
+                          <div className="linked-title">{item.linked.title ?? item.link.title ?? item.linked.url}</div>
+                          <div className="card-sub">
+                            {[item.linked.siteName ?? hostOf(item.linked.url), item.linked.author, item.linked.publishedAt ? longDate(item.linked.publishedAt) : null]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          </div>
+                          <div className="card-sub">保存: {longDate(item.linked.fetchedAt)}</div>
+                        </div>
+                      </div>
+                      <div className={`linked-body${expanded ? " expanded" : ""}`}>
+                        {item.linkedHtml ? (
+                          // 本文はバックエンドで ammonia によりサニタイズ済み
+                          <div className="prose" dangerouslySetInnerHTML={{ __html: item.linkedHtml }} onClick={openLinksExternally} />
+                        ) : (
+                          <div className="detail-text" style={{ fontSize: 15 }}>
+                            {item.linkedText}
+                          </div>
+                        )}
+                      </div>
+                      <div className="linked-foot">
+                        <button className="btn btn-sm btn-ghost" onClick={() => setExpanded((v) => !v)}>
+                          {expanded ? "折りたたむ" : "全文を表示"}
+                        </button>
+                        <button className="btn btn-sm btn-ghost" onClick={() => openExternal(item.linked!.url)}>
+                          <ExternalLink /> 元のページ
+                        </button>
+                        <button className="btn btn-sm btn-ghost" onClick={refetchLinked} disabled={refetching} title="最新の内容で保存し直す">
+                          {refetching ? <LoaderCircle className="spin" /> : <RotateCw />} 取り直す
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="callout">
+                      <BookOpen />
+                      <div style={{ flex: 1 }}>
+                        {item.linked?.error ? (
+                          <>
+                            紹介先のページを保存できませんでした。
+                            <div className="muted" style={{ wordBreak: "break-all" }}>{item.linked.error}</div>
+                          </>
+                        ) : (
+                          "紹介先のページはまだ保存していません。"
+                        )}
+                        <div style={{ marginTop: 8 }}>
+                          <button className="btn btn-sm" onClick={refetchLinked} disabled={refetching}>
+                            {refetching ? <LoaderCircle className="spin" /> : <RotateCw />}
+                            {item.linked?.error ? "もう一度試す" : "今すぐ保存する"}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {isArticle && (
                 <div className="detail-section">
                   <div className="section-label">
@@ -253,14 +343,7 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
                       className="prose"
                       // 本文はバックエンドで ammonia によりサニタイズ済み
                       dangerouslySetInnerHTML={{ __html: item.contentHtml }}
-                      onClick={(e) => {
-                        const a = (e.target as HTMLElement).closest("a");
-                        if (a) {
-                          e.preventDefault();
-                          const href = a.getAttribute("href");
-                          if (href) openExternal(href);
-                        }
-                      }}
+                      onClick={openLinksExternally}
                     />
                   ) : (
                     <div className="detail-text" style={{ fontSize: 15 }}>

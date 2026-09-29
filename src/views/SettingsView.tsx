@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AtSign, Bot, Copy, Download, FolderOpen, Info, KeyRound, LoaderCircle, LogOut, RefreshCw, Sparkles, SlidersHorizontal } from "lucide-react";
+import { AtSign, BookOpen, Bot, Copy, Download, FolderOpen, Info, KeyRound, LoaderCircle, LogOut, RefreshCw, Sparkles, SlidersHorizontal } from "lucide-react";
 import { api, errorMessage, mediaSrc } from "../api";
 import { Switch, openExternal } from "../components/common";
 import { longDate } from "../lib/format";
@@ -23,9 +23,12 @@ export function SettingsView({ settings, onSettings, onSync, syncing, onChanged,
   const [pending, setPending] = useState<number | null>(null);
   const [tagging, setTagging] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [pendingLinks, setPendingLinks] = useState<number | null>(null);
+  const [fetchingLinks, setFetchingLinks] = useState(false);
 
   useEffect(() => {
     api.countPendingTags().then(setPending).catch(() => undefined);
+    api.countPendingLinks().then(setPendingLinks).catch(() => undefined);
   }, [settings]);
 
   const save = async (patch: SettingsPatch, message?: string) => {
@@ -78,6 +81,21 @@ export function SettingsView({ settings, onSettings, onSync, syncing, onChanged,
       toast("error", errorMessage(e));
     } finally {
       setDownloading(false);
+    }
+  };
+
+  const fetchLinks = async () => {
+    setFetchingLinks(true);
+    try {
+      const n = await api.fetchLinkedPending();
+      const rest = await api.countPendingLinks();
+      setPendingLinks(rest);
+      toast(n ? "success" : "info", rest ? `紹介先のページを ${n} 件保存しました（取得できなかったもの ${rest} 件）` : `紹介先のページを ${n} 件保存しました`);
+      onChanged();
+    } catch (e) {
+      toast("error", errorMessage(e));
+    } finally {
+      setFetchingLinks(false);
     }
   };
 
@@ -371,6 +389,19 @@ export function SettingsView({ settings, onSettings, onSync, syncing, onChanged,
                   if (v && v !== settings.pickupCount) save({ pickupCount: v }, "保存しました（明日から、または「引き直す」で反映）");
                 }}
               />
+            </div>
+            <div className="row">
+              <div className="row-label">
+                紹介先のページも保存
+                <div className="row-hint">ポスト内のリンク先の本文と画像を保存</div>
+              </div>
+              <div className="inline">
+                <Switch on={settings.fetchLinks} onChange={(v) => save({ fetchLinks: v })} label="紹介先のページを保存" />
+                <button className="btn btn-sm" onClick={fetchLinks} disabled={fetchingLinks || !pendingLinks}>
+                  {fetchingLinks ? <LoaderCircle className="spin" /> : <BookOpen />}
+                  {pendingLinks ? `未保存・失敗の ${pendingLinks.toLocaleString()} 件を保存` : "未保存のものはありません"}
+                </button>
+              </div>
             </div>
             <div className="row">
               <div className="row-label">

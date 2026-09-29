@@ -2,6 +2,7 @@
 //!
 //!   mynote sync [--full]   X のいいね・ブックマークを同期して、画像保存とタグ付けまで行う
 //!   mynote add <URL>...    記事や X のポストを追加する
+//!   mynote links           ポストの紹介先ページをまとめて保存する
 //!   mynote tag             まだ AI タグ付けしていないものをタグ付けする
 
 use crate::core::{default_data_dir, Core};
@@ -13,6 +14,7 @@ const HELP: &str = "mynote — X のいいね・ブックマークと Web 記事
   mynote                 アプリを開く
   mynote sync [--full]   X のいいね・ブックマークを同期（--full で全件を取り直す）
   mynote add <URL>...    記事や X のポストを追加
+  mynote links [--retry] ポストの紹介先ページをまとめて保存（--retry で失敗分も再取得）
   mynote tag             未タグ付けのものを Claude でタグ付け
   mynote help            このヘルプ
 
@@ -21,7 +23,7 @@ const HELP: &str = "mynote — X のいいね・ブックマークと Web 記事
   ANTHROPIC_API_KEY      設定画面で API キーを入れていないときに使う";
 
 pub fn is_cli_command(arg: &str) -> bool {
-    matches!(arg, "sync" | "add" | "tag" | "help" | "--help" | "-h")
+    matches!(arg, "sync" | "add" | "links" | "tag" | "help" | "--help" | "-h")
 }
 
 pub fn run(args: &[String]) -> i32 {
@@ -64,12 +66,15 @@ pub fn run(args: &[String]) -> i32 {
                 let full = args.iter().any(|a| a == "--full");
                 match core.sync_x(full).await {
                     Ok((report, ids)) => {
-                        let (saved, tagged) = core.postprocess(&ids).await;
+                        let post = core.postprocess(&ids).await;
                         println!("{}", report.summary());
-                        if saved > 0 {
-                            println!("画像 {saved} 件を保存");
+                        if post.links > 0 {
+                            println!("紹介先のページ {} 件を保存", post.links);
                         }
-                        if let Some(t) = tagged {
+                        if post.media > 0 {
+                            println!("画像 {} 件を保存", post.media);
+                        }
+                        if let Some(t) = post.tagged {
                             println!("タグ付け {} 件（失敗 {} 件）", t.tagged, t.failed);
                         }
                         for e in &report.errors {
@@ -109,6 +114,20 @@ pub fn run(args: &[String]) -> i32 {
                 }
                 core.postprocess(&ids).await;
                 code
+            }
+            "links" => {
+                let retry = args.iter().any(|a| a == "--retry");
+                match core.fetch_linked_pages(None, retry).await {
+                    Ok(n) => {
+                        println!("紹介先のページ {n} 件を保存");
+                        let _ = core.download_media(None).await;
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("{e:#}");
+                        1
+                    }
+                }
             }
             "tag" => match core.tag_pending(10_000).await {
                 Ok(r) => {

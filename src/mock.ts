@@ -55,6 +55,15 @@ const items: Item[] = [
     metrics: { like_count: 1280, retweet_count: 210 },
     publishedAt: ago(30),
     link: { url: "https://v2.tauri.app/", title: "Tauri 2.0", description: "Create small, fast, secure, cross-platform applications", image: cover("#1e3a8a", "#0ea5e9", "Tauri 2.0") },
+    linked: {
+      url: "https://v2.tauri.app/",
+      title: "Tauri 2.0 | Tauri",
+      siteName: "Tauri",
+      excerpt: "Create small, fast, secure, cross-platform applications",
+      imageUrl: cover("#1e3a8a", "#0ea5e9", "Tauri 2.0"),
+      fetchedAt: ago(29),
+      hasContent: true,
+    },
   }),
   base({
     kind: "article",
@@ -139,7 +148,8 @@ const items: Item[] = [
     authorName: "フロントエンド通信",
     authorHandle: "fe_tsushin",
     authorAvatar: avatar("F", "#0ea5e9", "#22d3ee"),
-    text: "React 19 の use() と Suspense の組み合わせ、データ取得の書き方がかなりすっきりする。サンプルを置いておきます 👇",
+    text: "React 19 の use() と Suspense の組み合わせ、データ取得の書き方がかなりすっきりする。サンプルを置いておきます 👇 https://react.dev/blog",
+    link: { url: "https://react.dev/blog", title: "React Blog" },
     isBookmarked: true,
     tags: ["React", "フロントエンド"],
     summary: "React 19 の use() と Suspense でデータ取得を簡潔に",
@@ -220,6 +230,7 @@ const settings: Settings = {
   autoTag: true,
   pickupCount: 5,
   downloadMedia: true,
+  fetchLinks: true,
   dataDir: "~/.local/share/dev.mynote.desktop",
 };
 
@@ -292,6 +303,10 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
       contentHtml: it.kind === "article"
         ? `<p>${it.excerpt ?? ""}</p><h2>はじめに</h2><p>${it.text}</p><blockquote>引用のサンプルです。</blockquote><p>詳しくは<a href="https://example.com">元の記事</a>を参照してください。</p><pre><code>CREATE VIRTUAL TABLE items_fts USING fts5(title, body, tokenize = 'trigram');</code></pre>`
         : null,
+      linkedHtml: it.linked?.hasContent
+        ? `<h2>Tauri 2.0 とは</h2><p>Tauri は、Web フロントエンドと Rust で小さく速く安全なデスクトップ・モバイルアプリを作るためのフレームワークです。</p><p>この本文は、ポストの紹介先ページとしてローカルに保存されたものです。元のページが消えても読み返せます。</p><blockquote>Build smaller, faster, and more secure applications.</blockquote>`
+        : null,
+      linkedText: it.linked?.hasContent ? "Tauri は…" : null,
     };
   },
   get_stats: (): Stats => ({
@@ -346,6 +361,14 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
     }
     return { day, items: picks.map((id) => items.find((i) => i.id === id)!).filter(Boolean) };
   },
+  refetch_linked: async ({ id }) => {
+    await sleep(700);
+    const it = items.find((i) => i.id === id)!;
+    it.linked = { url: it.link?.url ?? it.url, title: it.link?.title ?? "紹介先", siteName: "Example", fetchedAt: new Date().toISOString(), hasContent: true };
+    return handlers.get_item({ id });
+  },
+  fetch_linked_pending: async () => 0,
+  count_pending_links: () => items.filter((i) => i.link && !i.linked?.hasContent).length,
   download_media: () => 0,
   open_data_dir: () => undefined,
   open_external: ({ url }) => {

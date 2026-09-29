@@ -35,6 +35,28 @@ pub struct LinkCard {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<String>,
+    /// プレビュー画像をローカルに保存済みなら、そのファイルパス（表示時に付与）
+    #[serde(default, skip_deserializing)]
+    pub image_local: Option<String>,
+}
+
+/// ポストが紹介しているリンク先ページ（本文ごとローカルに保存したもの）
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedPage {
+    /// リダイレクト後の URL
+    pub url: String,
+    pub title: Option<String>,
+    pub site_name: Option<String>,
+    pub author: Option<String>,
+    pub excerpt: Option<String>,
+    pub image_url: Option<String>,
+    pub image_local: Option<String>,
+    pub published_at: Option<String>,
+    pub fetched_at: String,
+    /// 取得に失敗したときの理由
+    pub error: Option<String>,
+    pub has_content: bool,
 }
 
 /// 保存前のアイテム（ツイート・記事共通）
@@ -100,6 +122,7 @@ pub struct Item {
     pub note: Option<String>,
     pub has_content: bool,
     pub tags: Vec<String>,
+    pub linked: Option<LinkedPage>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -108,6 +131,9 @@ pub struct ItemDetail {
     #[serde(flatten)]
     pub item: Item,
     pub content_html: Option<String>,
+    /// 紹介先ページの本文（サニタイズ済み HTML とテキスト）
+    pub linked_html: Option<String>,
+    pub linked_text: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -183,6 +209,7 @@ pub struct PublicSettings {
     pub auto_tag: bool,
     pub pickup_count: i64,
     pub download_media: bool,
+    pub fetch_links: bool,
     pub data_dir: String,
 }
 
@@ -203,6 +230,7 @@ pub struct SettingsPatch {
     pub auto_tag: Option<bool>,
     pub pickup_count: Option<i64>,
     pub download_media: Option<bool>,
+    pub fetch_links: Option<bool>,
 }
 
 #[derive(Serialize, Clone, Debug)]

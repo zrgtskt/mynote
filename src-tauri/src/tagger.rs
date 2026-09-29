@@ -15,6 +15,8 @@ pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// 記事本文はこの文字数までを分類に使う（全文は送らない）
 pub const MAX_BODY_CHARS: usize = 6000;
+/// 紹介先ページの本文はこの文字数まで使う
+pub const MAX_LINKED_CHARS: usize = 3000;
 /// 既存タグは使用数の多い順にこの数まで伝える
 const MAX_VOCAB: usize = 300;
 
@@ -82,7 +84,7 @@ fn supports_default_fallback(model: &str) -> bool {
     model.starts_with("claude-opus-5") || model.starts_with("claude-fable-5") || model.starts_with("claude-sonnet-5-5")
 }
 
-pub fn build_user_prompt(item: &Item, vocab: &[TagCount]) -> String {
+pub fn build_user_prompt(item: &Item, linked_text: Option<&str>, vocab: &[TagCount]) -> String {
     let mut p = String::new();
     let names: Vec<&str> = vocab.iter().take(MAX_VOCAB).map(|t| t.name.as_str()).collect();
     if names.is_empty() {
@@ -131,6 +133,27 @@ pub fn build_user_prompt(item: &Item, vocab: &[TagCount]) -> String {
     if truncated {
         p.push_str(&format!("\n（本文が長いため、先頭 {MAX_BODY_CHARS} 文字のみ）"));
     }
+    if let Some(page) = &item.linked {
+        if page.error.is_none() {
+            p.push_str("\n\n紹介先のページ:\n");
+            if let Some(t) = &page.title {
+                p.push_str(&format!("タイトル: {t}\n"));
+            }
+            if let Some(site) = &page.site_name {
+                p.push_str(&format!("サイト: {site}\n"));
+            }
+            if let Some(text) = linked_text.filter(|t| !t.trim().is_empty()) {
+                let body: String = text.chars().take(MAX_LINKED_CHARS).collect();
+                p.push_str("本文:\n");
+                p.push_str(&body);
+                if text.chars().count() > MAX_LINKED_CHARS {
+                    p.push_str(&format!("\n（先頭 {MAX_LINKED_CHARS} 文字のみ）"));
+                }
+            } else if let Some(e) = &page.excerpt {
+                p.push_str(&format!("概要: {e}"));
+            }
+        }
+    }
     if let Some(note) = &item.note {
         p.push_str(&format!("\nユーザーのメモ: {note}"));
     }
@@ -138,7 +161,7 @@ pub fn build_user_prompt(item: &Item, vocab: &[TagCount]) -> String {
     p
 }
 
-pub fn build_request(model: &str, item: &Item, vocab: &[TagCount]) -> Value {
+pub fn build_request(model: &str, item: &Item, linked_text: Option<&str>, vocab: &[TagCount]) -> Value {
     let mut output_config = json!({
         "format": {"type": "json_schema", "schema": output_schema()}
     });
@@ -151,7 +174,7 @@ pub fn build_request(model: &str, item: &Item, vocab: &[TagCount]) -> Value {
         "max_tokens": 4000,
         "system": SYSTEM_PROMPT,
         "output_config": output_config,
-        "messages": [{"role": "user", "content": build_user_prompt(item, vocab)}]
+        "messages": [{"role": "user", "content": build_user_prompt(item, linked_text, vocab)}]
     });
     if supports_default_fallback(model) {
         // 安全分類器で断られたとき、サーバー側で推奨モデルに切り替えて再実行する
@@ -199,9 +222,10 @@ pub async fn tag_item(
     api_key: &str,
     model: &str,
     item: &Item,
+    linked_text: Option<&str>,
     vocab: &[TagCount],
 ) -> Result<TagResult> {
-    let body = build_request(model, item, vocab);
+    let body = build_request(model, item, linked_text, vocab);
     let mut attempt = 0;
     loop {
         attempt += 1;
@@ -277,7 +301,30 @@ mod tests {
             note: None,
             has_content: false,
             tags: vec![],
+            linked: None,
         }
+    }
+
+    #[test]
+    fn prompt_includes_linked_page() {
+        let mut it = item("tweet", "これ良かった https://blog.example.com/a");
+        it.linked = Some(crate::models::LinkedPage {
+            url: "https://blog.example.com/a".into(),
+            title: Some("SQLite 全文検索入門".into()),
+            site_name: Some("Blog".into()),
+            fetched_at: "2026-09-29T00:00:00Z".into(),
+            has_content: true,
+            ..Default::default()
+        });
+        let long = "本".repeat(MAX_LINKED_CHARS + 10);
+        let prompt = build_user_prompt(&it, Some(&long), &[]);
+        assert!(prompt.contains("紹介先のページ"));
+        assert!(prompt.contains("SQLite 全文検索入門"));
+        assert!(prompt.contains("先頭 3000 文字のみ"));
+
+        // 取得に失敗した紹介先は使わない
+        it.linked.as_mut().unwrap().error = Some("404".into());
+        assert!(!build_user_prompt(&it, None, &[]).contains("紹介先のページ"));
     }
 
     #[test]
@@ -286,7 +333,7 @@ mod tests {
             name: "Rust".into(),
             count: 3,
         }];
-        let body = build_request(DEFAULT_MODEL, &item("tweet", "Tauri 2 がリリース"), &vocab);
+        let body = build_request(DEFAULT_MODEL, &item("tweet", "Tauri 2 がリリース"), None, &vocab);
         assert_eq!(body["model"], "claude-opus-5-5");
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(body["output_config"]["effort"], "low");
@@ -303,7 +350,7 @@ mod tests {
 
     #[test]
     fn request_for_haiku_omits_unsupported_params() {
-        let body = build_request("claude-haiku-4-5", &item("tweet", "x"), &[]);
+        let body = build_request("claude-haiku-4-5", &item("tweet", "x"), None, &[]);
         assert!(body["output_config"].get("effort").is_none());
         assert!(body.get("fallbacks").is_none());
     }
@@ -311,7 +358,7 @@ mod tests {
     #[test]
     fn long_article_body_is_truncated_with_note() {
         let long = "字".repeat(MAX_BODY_CHARS + 100);
-        let prompt = build_user_prompt(&item("article", &long), &[]);
+        let prompt = build_user_prompt(&item("article", &long), None, &[]);
         assert!(prompt.contains("先頭 6000 文字のみ"));
         assert!(prompt.contains("既存タグ: （まだありません）"));
     }

@@ -38,6 +38,7 @@ mod keys {
     pub const AUTO_TAG: &str = "claude.auto_tag";
     pub const PICKUP_COUNT: &str = "pickup.count";
     pub const DOWNLOAD_MEDIA: &str = "media.download";
+    pub const FETCH_LINKS: &str = "link.fetch";
 }
 
 /// 自動同期の間隔（前回から何時間たったら同期するか）
@@ -47,6 +48,14 @@ const INCREMENTAL_FIRST_PAGE: i64 = 20;
 const MAX_MEDIA_BYTES: usize = 15 * 1024 * 1024;
 
 pub type ProgressFn = Box<dyn Fn(Progress) + Send + Sync>;
+
+/// 同期・追加のあとの処理の結果
+#[derive(Debug, Default)]
+pub struct PostReport {
+    pub links: i64,
+    pub media: i64,
+    pub tagged: Option<TagReport>,
+}
 
 /// データの保存先。GUI と CLI で同じ場所を使う。
 pub fn default_data_dir() -> Result<PathBuf> {
@@ -66,6 +75,7 @@ pub struct Core {
     pub media_dir: PathBuf,
     sync_lock: tokio::sync::Mutex<()>,
     tag_lock: tokio::sync::Mutex<()>,
+    link_lock: tokio::sync::Mutex<()>,
     token_lock: tokio::sync::Mutex<()>,
     connect_lock: tokio::sync::Mutex<()>,
     progress: ProgressFn,
@@ -88,6 +98,7 @@ impl Core {
             media_dir,
             sync_lock: Default::default(),
             tag_lock: Default::default(),
+            link_lock: Default::default(),
             token_lock: Default::default(),
             connect_lock: Default::default(),
             progress,
@@ -169,6 +180,7 @@ impl Core {
             auto_tag: self.get_bool(keys::AUTO_TAG, true),
             pickup_count: self.pickup_count(),
             download_media: self.get_bool(keys::DOWNLOAD_MEDIA, true),
+            fetch_links: self.get_bool(keys::FETCH_LINKS, true),
             data_dir: self.data_dir.display().to_string(),
         }
     }
@@ -214,6 +226,9 @@ impl Core {
         }
         if let Some(v) = p.download_media {
             self.set_bool(keys::DOWNLOAD_MEDIA, v)?;
+        }
+        if let Some(v) = p.fetch_links {
+            self.set_bool(keys::FETCH_LINKS, v)?;
         }
         Ok(self.settings())
     }
@@ -451,19 +466,20 @@ impl Core {
         Ok((report, new_ids))
     }
 
-    /// 同期のあとの処理（画像保存と自動タグ付け）
-    pub async fn postprocess(&self, ids: &[i64]) -> (i64, Option<TagReport>) {
-        let saved = if ids.is_empty() {
-            0
-        } else {
-            self.download_media(Some(ids)).await.unwrap_or(0)
-        };
-        let tagged = if self.get_bool(keys::AUTO_TAG, true) && self.anthropic_key().is_some() {
-            self.tag_pending(500).await.ok()
-        } else {
-            None
-        };
-        (saved, tagged)
+    /// 同期・追加のあとの処理。紹介先ページの保存 → 画像の保存 → 自動タグ付けの順に行う
+    /// （タグ付けに紹介先の内容を使うため）。
+    pub async fn postprocess(&self, ids: &[i64]) -> PostReport {
+        let mut report = PostReport::default();
+        if !ids.is_empty() {
+            if self.get_bool(keys::FETCH_LINKS, true) {
+                report.links = self.fetch_linked_pages(Some(ids), false).await.unwrap_or(0);
+            }
+            report.media = self.download_media(Some(ids)).await.unwrap_or(0);
+        }
+        if self.get_bool(keys::AUTO_TAG, true) && self.anthropic_key().is_some() {
+            report.tagged = self.tag_pending(500).await.ok();
+        }
+        report
     }
 
     // ------------------------------------------------------------ URL を追加
@@ -503,7 +519,7 @@ impl Core {
                 x_api::fetch_oembed(&self.http, raw, &id).await
             }
         } else {
-            article::fetch(&self.http, raw).await
+            article::fetch(&self.http, raw).await.map(|f| f.item)
         }
     }
 
@@ -537,8 +553,8 @@ impl Core {
                 let db = self.db();
                 (db.item_for_tagging(id)?, db.list_tags()?)
             };
-            let Some(item) = item else { continue };
-            match tagger::tag_item(&self.http, &key, &model, &item, &vocab).await {
+            let Some((item, linked_text)) = item else { continue };
+            match tagger::tag_item(&self.http, &key, &model, &item, linked_text.as_deref(), &vocab).await {
                 Ok(r) => {
                     let mut db = self.db();
                     db.add_item_tags(id, &r.tags, "ai")?;
@@ -585,8 +601,8 @@ impl Core {
             let db = self.db();
             (db.item_for_tagging(id)?, db.list_tags()?)
         };
-        let item = item.ok_or_else(|| anyhow!("アイテムが見つかりません"))?;
-        let r = tagger::tag_item(&self.http, &key, &model, &item, &vocab).await?;
+        let (item, linked_text) = item.ok_or_else(|| anyhow!("アイテムが見つかりません"))?;
+        let r = tagger::tag_item(&self.http, &key, &model, &item, linked_text.as_deref(), &vocab).await?;
         {
             let mut db = self.db();
             db.remove_ai_tags(id)?;
@@ -596,6 +612,87 @@ impl Core {
             }
             db.mark_ai_tagged(id)?;
         }
+        self.db()
+            .get_item(id)?
+            .ok_or_else(|| anyhow!("アイテムが見つかりません"))
+    }
+
+    // ------------------------------------------------------------ 紹介先ページの保存
+
+    /// ポストが紹介しているリンク先ページを取得し、本文ごと保存する。
+    /// ids が None なら、まだ保存していないもの（retry_errors なら前回失敗したものも）をまとめて処理する。
+    pub async fn fetch_linked_pages(&self, ids: Option<&[i64]>, retry_errors: bool) -> Result<i64> {
+        let Ok(_guard) = self.link_lock.try_lock() else {
+            bail!("すでに紹介先ページを保存中です");
+        };
+        let targets = self.db().items_needing_link(ids, retry_errors, 5000)?;
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        let total = targets.len() as i64;
+        let mut saved = 0;
+        let mut done = 0i64;
+        let mut set = tokio::task::JoinSet::new();
+        let mut queue = targets.into_iter();
+        loop {
+            while set.len() < 4 {
+                let Some((id, url)) = queue.next() else { break };
+                let http = self.http.clone();
+                set.spawn(async move {
+                    let r = article::fetch(&http, &url).await;
+                    (id, url, r)
+                });
+            }
+            let Some(joined) = set.join_next().await else { break };
+            done += 1;
+            if let Ok((id, url, result)) = joined {
+                let stored = match &result {
+                    Ok(f) => self.db().save_linked_page(id, &f.final_url, Ok(&f.item)),
+                    Err(e) => self.db().save_linked_page(id, &url, Err(&format!("{e:#}"))),
+                };
+                if stored.is_ok() && result.is_ok() {
+                    saved += 1;
+                }
+            }
+            self.emit(
+                "link",
+                format!("紹介先のページを保存中…（{done}/{total}）"),
+                done,
+                total,
+                done == total,
+            );
+        }
+        if saved < total {
+            self.emit(
+                "link",
+                format!(
+                    "紹介先のページを {saved} 件保存（取得できなかったもの {} 件）",
+                    total - saved
+                ),
+                total,
+                total,
+                true,
+            );
+        }
+        Ok(saved)
+    }
+
+    /// 1 件の紹介先ページを取り直す
+    pub async fn refetch_linked_page(&self, id: i64) -> Result<ItemDetail> {
+        let url = self
+            .db()
+            .get_item(id)?
+            .and_then(|d| d.item.link.map(|l| l.url))
+            .ok_or_else(|| anyhow!("このアイテムには紹介先のリンクがありません"))?;
+        let result = article::fetch(&self.http, &url).await;
+        match &result {
+            Ok(f) => self.db().save_linked_page(id, &f.final_url, Ok(&f.item))?,
+            Err(e) => self.db().save_linked_page(id, &url, Err(&format!("{e:#}")))?,
+        }
+        if let Err(e) = result {
+            return Err(e.context("紹介先のページを取得できませんでした"));
+        }
+        let _ = self.download_media(Some(&[id])).await;
         self.db()
             .get_item(id)?
             .ok_or_else(|| anyhow!("アイテムが見つかりません"))
@@ -745,6 +842,94 @@ mod tests {
         let old = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
         c.set(keys::LAST_SYNC_AT, &old).unwrap();
         assert!(c.should_auto_sync());
+    }
+
+    /// ローカルに立てた HTTP サーバーから紹介先ページを取得して保存する
+    #[tokio::test]
+    async fn fetches_and_stores_linked_page_end_to_end() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let (status, body) = match path.as_str() {
+                    // 短縮 URL のようにリダイレクトする
+                    "/short" => ("301 Moved Permanently\r\nLocation: /article", String::new()),
+                    "/article" => (
+                        "200 OK\r\nContent-Type: text/html; charset=utf-8",
+                        "<html><head><title>紹介された記事</title><meta property=\"og:site_name\" content=\"ローカルブログ\"></head>\
+                         <body><article><h1>紹介された記事</h1><p>ポストが紹介していた記事の本文です。ローカルに保存しておけば、\
+                         元のページが消えても読み返せます。trigram による全文検索の対象にもなります。</p>\
+                         <p>二つ目の段落です。十分な長さの本文があると Readability が本文として認識します。</p></article></body></html>"
+                            .to_string(),
+                    ),
+                    _ => ("404 Not Found", String::new()),
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let (c, _d) = core();
+        let mut t = NewItem {
+            key: "tweet:1".into(),
+            kind: KIND_TWEET.into(),
+            url: "https://x.com/a/status/1".into(),
+            text: "おすすめ".into(),
+            ..Default::default()
+        };
+        t.link = Some(LinkCard {
+            url: format!("http://127.0.0.1:{port}/short"),
+            ..Default::default()
+        });
+        let ok_id = c.db().upsert_item(&t, SourceFlags::default(), &now_iso()).unwrap().id;
+        t.key = "tweet:2".into();
+        t.link = Some(LinkCard {
+            url: format!("http://127.0.0.1:{port}/missing"),
+            ..Default::default()
+        });
+        let ng_id = c.db().upsert_item(&t, SourceFlags::default(), &now_iso()).unwrap().id;
+
+        let saved = c.fetch_linked_pages(None, false).await.unwrap();
+        assert_eq!(saved, 1);
+
+        let detail = c.db().get_item(ok_id).unwrap().unwrap();
+        let page = detail.item.linked.unwrap();
+        assert_eq!(
+            page.url,
+            format!("http://127.0.0.1:{port}/article"),
+            "リダイレクト後の URL"
+        );
+        assert_eq!(page.site_name.as_deref(), Some("ローカルブログ"));
+        assert!(detail.linked_text.unwrap().contains("元のページが消えても読み返せます"));
+        assert!(detail.linked_html.unwrap().contains("<p>"));
+
+        let failed = c.db().get_item(ng_id).unwrap().unwrap().item.linked.unwrap();
+        assert!(failed.error.unwrap().contains("404"));
+
+        let hits = c
+            .db()
+            .list_items(&ItemQuery {
+                keyword: Some("読み返せます".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hits.items.iter().map(|i| i.id).collect::<Vec<_>>(), vec![ok_id]);
+
+        // 失敗したものは retry で取り直しの対象になる（まだ 404 なので失敗のまま）
+        assert_eq!(c.fetch_linked_pages(None, true).await.unwrap(), 0);
+        assert!(c.refetch_linked_page(ng_id).await.is_err());
+        assert!(c.refetch_linked_page(ok_id).await.is_ok());
     }
 
     #[test]

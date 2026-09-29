@@ -139,6 +139,28 @@ pub async fn retag_item(app: AppHandle, core: CoreState<'_>, id: i64) -> Res<Ite
     r
 }
 
+/// 1 件の紹介先ページを取り直す
+#[tauri::command]
+pub async fn refetch_linked(app: AppHandle, core: CoreState<'_>, id: i64) -> Res<ItemDetail> {
+    let r = core.refetch_linked_page(id).await.map_err(err);
+    notify_changed(&app);
+    r
+}
+
+/// まだ保存していない（または前回失敗した）紹介先ページをまとめて保存する
+#[tauri::command]
+pub async fn fetch_linked_pending(app: AppHandle, core: CoreState<'_>) -> Res<i64> {
+    let n = core.fetch_linked_pages(None, true).await.map_err(err)?;
+    let _ = core.download_media(None).await;
+    notify_changed(&app);
+    Ok(n)
+}
+
+#[tauri::command]
+pub async fn count_pending_links(core: CoreState<'_>) -> Res<i64> {
+    core.db().count_items_needing_link().map_err(err)
+}
+
 #[tauri::command]
 pub async fn daily_pickup(core: CoreState<'_>, reshuffle: Option<bool>) -> Res<DailyPickup> {
     let day = chrono::Local::now().format("%Y-%m-%d").to_string();

@@ -972,6 +972,73 @@ button.chip:hover {
   color: var(--text-3);
 }
 
+.saved-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 8px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--ok);
+  background: rgba(61, 220, 151, 0.12);
+  vertical-align: 1px;
+}
+
+.saved-badge svg {
+  width: 11px;
+  height: 11px;
+}
+
+.linked-box {
+  border-radius: 14px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.linked-head {
+  display: flex;
+  gap: 12px;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+  align-items: flex-start;
+}
+
+.linked-head img {
+  width: 96px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 8px;
+  flex: none;
+  background: var(--surface-3);
+}
+
+.linked-title {
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.linked-body {
+  padding: 16px 18px 6px;
+  max-height: 560px;
+  overflow-y: auto;
+}
+
+.linked-body.expanded {
+  max-height: none;
+}
+
+.linked-foot {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+
 .link-card-title {
   font-size: 12.5px;
   font-weight: 600;

@@ -16,6 +16,22 @@ export interface LinkCard {
   title?: string | null;
   description?: string | null;
   image?: string | null;
+  imageLocal?: string | null;
+}
+
+/** ポストが紹介しているリンク先ページ（本文ごとローカルに保存したもの） */
+export interface LinkedPage {
+  url: string;
+  title?: string | null;
+  siteName?: string | null;
+  author?: string | null;
+  excerpt?: string | null;
+  imageUrl?: string | null;
+  imageLocal?: string | null;
+  publishedAt?: string | null;
+  fetchedAt: string;
+  error?: string | null;
+  hasContent: boolean;
 }
 
 export interface Item {
@@ -46,10 +62,13 @@ export interface Item {
   note?: string | null;
   hasContent: boolean;
   tags: string[];
+  linked?: LinkedPage | null;
 }
 
 export interface ItemDetail extends Item {
   contentHtml?: string | null;
+  linkedHtml?: string | null;
+  linkedText?: string | null;
 }
 
 export type Filter = "all" | "liked" | "bookmarked" | "tweet" | "article" | "manual" | "untagged";
@@ -112,6 +131,7 @@ export interface Settings {
   autoTag: boolean;
   pickupCount: number;
   downloadMedia: boolean;
+  fetchLinks: boolean;
   dataDir: string;
 }
 
@@ -127,10 +147,11 @@ export type SettingsPatch = Partial<{
   autoTag: boolean;
   pickupCount: number;
   downloadMedia: boolean;
+  fetchLinks: boolean;
 }>;
 
 export interface Progress {
-  task: "sync" | "tag" | "media" | "add" | string;
+  task: "sync" | "tag" | "media" | "add" | "link" | string;
   message: string;
   current: number;
   total: number;

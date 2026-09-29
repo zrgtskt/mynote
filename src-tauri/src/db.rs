@@ -10,7 +10,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 
 use crate::models::*;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS items (
@@ -85,6 +85,24 @@ CREATE TABLE IF NOT EXISTS kv (
 );
 "#;
 
+/// v2: ポストが紹介しているリンク先ページを本文ごと保存する
+const SCHEMA_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS linked_pages (
+    item_id      INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    url          TEXT NOT NULL,
+    title        TEXT,
+    site_name    TEXT,
+    author       TEXT,
+    excerpt      TEXT,
+    image_url    TEXT,
+    published_at TEXT,
+    content_html TEXT,
+    text         TEXT,
+    fetched_at   TEXT NOT NULL,
+    error        TEXT
+);
+"#;
+
 /// 一覧・詳細で共通の SELECT 列。text は一覧では切り詰める。
 const ITEM_COLUMNS: &str = "id, kind, url, external_id, title, author_name, author_handle, author_avatar, \
      site_name, {TEXT}, excerpt, summary, image_url, media_json, link_json, metrics_json, published_at, \
@@ -123,8 +141,13 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version < SCHEMA_VERSION {
+        if version < 1 {
             conn.execute_batch(SCHEMA_V1)?;
+        }
+        if version < 2 {
+            conn.execute_batch(SCHEMA_V2)?;
+        }
+        if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(Self { conn })
@@ -188,9 +211,20 @@ impl Db {
         };
         let mut items = vec![item];
         self.attach_extras(&mut items)?;
+        let (linked_html, linked_text) = self
+            .conn
+            .query_row(
+                "SELECT content_html, text FROM linked_pages WHERE item_id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((None, None));
         Ok(Some(ItemDetail {
             item: items.pop().unwrap(),
             content_html,
+            linked_html,
+            linked_text,
         }))
     }
 
@@ -320,6 +354,37 @@ impl Db {
             }
         }
 
+        let mut linked: HashMap<i64, LinkedPage> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT item_id, url, title, site_name, author, excerpt, image_url, published_at, fetched_at, error, \
+                        content_html IS NOT NULL AND content_html <> '' \
+                 FROM linked_pages WHERE item_id IN ({placeholders})"
+            ))?;
+            let rows = stmt.query_map(params_from_iter(ids.iter()), |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    LinkedPage {
+                        url: r.get(1)?,
+                        title: r.get(2)?,
+                        site_name: r.get(3)?,
+                        author: r.get(4)?,
+                        excerpt: r.get(5)?,
+                        image_url: r.get(6)?,
+                        image_local: None,
+                        published_at: r.get(7)?,
+                        fetched_at: r.get(8)?,
+                        error: r.get(9)?,
+                        has_content: r.get::<_, i64>(10)? != 0,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (id, page) = row?;
+                linked.insert(id, page);
+            }
+        }
+
         let mut urls: Vec<String> = Vec::new();
         for it in items.iter() {
             urls.extend(it.author_avatar.clone());
@@ -327,11 +392,20 @@ impl Db {
             for m in &it.media {
                 urls.extend(m.image_url().map(str::to_string));
             }
+            urls.extend(it.link.as_ref().and_then(|l| l.image.clone()));
         }
+        urls.extend(linked.values().filter_map(|p| p.image_url.clone()));
         let local = self.local_media_paths(&urls)?;
 
         for it in items.iter_mut() {
             it.tags = tags.remove(&it.id).unwrap_or_default();
+            it.linked = linked.remove(&it.id).map(|mut p| {
+                p.image_local = p.image_url.as_ref().and_then(|u| local.get(u).cloned());
+                p
+            });
+            if let Some(link) = it.link.as_mut() {
+                link.image_local = link.image.as_ref().and_then(|u| local.get(u).cloned());
+            }
             it.author_avatar_local = it.author_avatar.as_ref().and_then(|u| local.get(u).cloned());
             it.image_local = it.image_url.as_ref().and_then(|u| local.get(u).cloned());
             for m in it.media.iter_mut() {
@@ -586,6 +660,22 @@ impl Db {
                     urls.push(u.to_string());
                 }
             }
+            if let Some(LinkCard {
+                image: Some(u),
+                image_local: None,
+                ..
+            }) = &it.link
+            {
+                urls.push(u.clone());
+            }
+            if let Some(LinkedPage {
+                image_url: Some(u),
+                image_local: None,
+                ..
+            }) = &it.linked
+            {
+                urls.push(u.clone());
+            }
         }
         urls.sort();
         urls.dedup();
@@ -594,13 +684,133 @@ impl Db {
     }
 
     /// タグ付けに使うため、アイテムの本文を省略せずに取る
-    pub fn item_for_tagging(&self, id: i64) -> Result<Option<Item>> {
-        let sql = format!("SELECT {} FROM items WHERE id = ?1", item_columns(false));
-        let item = self.conn.query_row(&sql, [id], row_to_item).optional()?;
-        let Some(item) = item else { return Ok(None) };
-        let mut v = vec![item];
-        self.attach_extras(&mut v)?;
-        Ok(v.pop())
+    /// 紹介先ページの本文もあわせて返す
+    pub fn item_for_tagging(&self, id: i64) -> Result<Option<(Item, Option<String>)>> {
+        Ok(self.get_item(id)?.map(|d| (d.item, d.linked_text)))
+    }
+
+    // ---------------------------------------------------------------- 紹介先ページ
+
+    /// 紹介先ページをまだ保存していないポスト（id と URL）。retry_errors なら前回失敗したものも含める。
+    pub fn items_needing_link(
+        &self,
+        ids: Option<&[i64]>,
+        retry_errors: bool,
+        limit: i64,
+    ) -> Result<Vec<(i64, String)>> {
+        let mut sql = String::from(
+            "SELECT i.id, i.link_json FROM items i LEFT JOIN linked_pages lp ON lp.item_id = i.id \
+             WHERE i.link_json IS NOT NULL",
+        );
+        sql.push_str(if retry_errors {
+            " AND (lp.item_id IS NULL OR lp.error IS NOT NULL)"
+        } else {
+            " AND lp.item_id IS NULL"
+        });
+        let mut args: Vec<SqlValue> = Vec::new();
+        if let Some(ids) = ids {
+            if ids.is_empty() {
+                return Ok(vec![]);
+            }
+            sql.push_str(&format!(" AND i.id IN ({})", vec!["?"; ids.len()].join(",")));
+            args.extend(ids.iter().map(|id| SqlValue::Integer(*id)));
+        }
+        sql.push_str(&format!(" ORDER BY i.saved_at DESC LIMIT {}", limit.max(0)));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, json) = row?;
+            if let Ok(card) = serde_json::from_str::<LinkCard>(&json) {
+                out.push((id, card.url));
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn count_items_needing_link(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM items i LEFT JOIN linked_pages lp ON lp.item_id = i.id \
+             WHERE i.link_json IS NOT NULL AND (lp.item_id IS NULL OR lp.error IS NOT NULL)",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// 紹介先ページを保存する（失敗したときは理由だけ残し、次回まとめて再試行できるようにする）
+    pub fn save_linked_page(
+        &mut self,
+        item_id: i64,
+        url: &str,
+        page: std::result::Result<&NewItem, &str>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        match page {
+            Ok(p) => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO linked_pages \
+                        (item_id, url, title, site_name, author, excerpt, image_url, published_at, content_html, text, fetched_at, error) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
+                    params![
+                        item_id,
+                        url,
+                        p.title,
+                        p.site_name,
+                        p.author_name,
+                        p.excerpt,
+                        p.image_url,
+                        p.published_at,
+                        p.content_html,
+                        p.text,
+                        now_iso()
+                    ],
+                )?;
+                // リンクカードにタイトルがなければ、取得したページのタイトルで補う
+                if let Some(json) = tx
+                    .query_row("SELECT link_json FROM items WHERE id = ?1", [item_id], |r| {
+                        r.get::<_, Option<String>>(0)
+                    })
+                    .optional()?
+                    .flatten()
+                {
+                    if let Ok(mut card) = serde_json::from_str::<LinkCard>(&json) {
+                        let mut changed = false;
+                        if card.title.is_none() && p.title.is_some() {
+                            card.title = p.title.clone();
+                            changed = true;
+                        }
+                        if card.description.is_none() && p.excerpt.is_some() {
+                            card.description = p.excerpt.clone();
+                            changed = true;
+                        }
+                        if card.image.is_none() && p.image_url.is_some() {
+                            card.image = p.image_url.clone();
+                            changed = true;
+                        }
+                        if changed {
+                            tx.execute(
+                                "UPDATE items SET link_json = ?2 WHERE id = ?1",
+                                params![item_id, serde_json::to_string(&card)?],
+                            )?;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // 以前に保存できていた本文は消さない
+                tx.execute(
+                    "INSERT INTO linked_pages (item_id, url, fetched_at, error) VALUES (?1, ?2, ?3, ?4) \
+                     ON CONFLICT(item_id) DO UPDATE SET fetched_at = excluded.fetched_at, \
+                        error = CASE WHEN linked_pages.content_html IS NULL THEN excluded.error ELSE NULL END",
+                    params![item_id, url, now_iso(), e],
+                )?;
+            }
+        }
+        reindex_tx(&tx, item_id)?;
+        tx.commit()?;
+        Ok(())
     }
 }
 
@@ -649,6 +859,7 @@ fn row_to_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         note: r.get(22)?,
         has_content: r.get::<_, i64>(23).map(|v| v != 0).unwrap_or(false),
         tags: vec![],
+        linked: None,
     })
 }
 
@@ -752,10 +963,12 @@ fn reindex_tx(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
     tx.execute("DELETE FROM items_fts WHERE rowid = ?1", [id])?;
     tx.execute(
         "INSERT INTO items_fts (rowid, title, body, author, note, summary) \
-         SELECT id, COALESCE(title, ''), text || ' ' || COALESCE(excerpt, ''), \
-                TRIM(COALESCE(author_name, '') || ' @' || COALESCE(author_handle, '') || ' ' || COALESCE(site_name, '')), \
-                COALESCE(note, ''), COALESCE(summary, '') \
-         FROM items WHERE id = ?1",
+         SELECT i.id, COALESCE(i.title, ''), \
+                i.text || ' ' || COALESCE(i.excerpt, '') || ' ' || COALESCE(lp.title, '') || ' ' || COALESCE(lp.text, ''), \
+                TRIM(COALESCE(i.author_name, '') || ' @' || COALESCE(i.author_handle, '') || ' ' || COALESCE(i.site_name, '') \
+                     || ' ' || COALESCE(lp.site_name, '')), \
+                COALESCE(i.note, ''), COALESCE(i.summary, '') \
+         FROM items i LEFT JOIN linked_pages lp ON lp.item_id = i.id WHERE i.id = ?1",
         [id],
     )?;
     Ok(())
@@ -836,12 +1049,13 @@ fn build_where(q: &ItemQuery) -> (String, Vec<SqlValue>) {
             } else {
                 // 2 文字以下は trigram で引けないので LIKE で探す
                 let pat = format!("%{}%", escape_like(&term));
-                for _ in 0..7 {
+                for _ in 0..9 {
                     args.push(SqlValue::Text(pat.clone()));
                 }
                 "(i.title LIKE ? ESCAPE '\\' OR i.text LIKE ? ESCAPE '\\' OR i.author_name LIKE ? ESCAPE '\\' \
                   OR i.author_handle LIKE ? ESCAPE '\\' OR i.site_name LIKE ? ESCAPE '\\' OR i.note LIKE ? ESCAPE '\\' \
-                  OR i.summary LIKE ? ESCAPE '\\')"
+                  OR i.summary LIKE ? ESCAPE '\\' \
+                  OR i.id IN (SELECT item_id FROM linked_pages WHERE title LIKE ? ESCAPE '\\' OR text LIKE ? ESCAPE '\\'))"
                     .to_string()
             };
             conds.push(if negate { format!("NOT {cond}") } else { cond });
@@ -1086,6 +1300,103 @@ mod tests {
         assert_eq!(listed.text.chars().count(), LIST_TEXT_CHARS as usize);
         assert!(listed.has_content);
         assert_eq!(db.get_item(id).unwrap().unwrap().item.text.chars().count(), 2000);
+    }
+
+    #[test]
+    fn linked_page_is_saved_searchable_and_retried_on_error() {
+        let mut db = Db::open_in_memory().unwrap();
+        let mut t = tweet("1", "これ良かった");
+        t.link = Some(LinkCard {
+            url: "https://blog.example.com/a".into(),
+            ..Default::default()
+        });
+        let id = db.upsert_item(&t, liked(), &now_iso()).unwrap().id;
+        let plain = db
+            .upsert_item(&tweet("2", "リンクなし"), liked(), &now_iso())
+            .unwrap()
+            .id;
+
+        assert_eq!(
+            db.items_needing_link(None, false, 10).unwrap(),
+            vec![(id, "https://blog.example.com/a".to_string())],
+            "リンクのあるポストだけが対象"
+        );
+        assert!(db.items_needing_link(Some(&[plain]), false, 10).unwrap().is_empty());
+
+        // 失敗したときは理由だけ残し、retry_errors で再取得の対象になる
+        db.save_linked_page(id, "https://blog.example.com/a", Err("404 Not Found"))
+            .unwrap();
+        assert!(db.items_needing_link(None, false, 10).unwrap().is_empty());
+        assert_eq!(db.items_needing_link(None, true, 10).unwrap().len(), 1);
+        assert_eq!(db.count_items_needing_link().unwrap(), 1);
+        let linked = db.get_item(id).unwrap().unwrap().item.linked.unwrap();
+        assert_eq!(linked.error.as_deref(), Some("404 Not Found"));
+        assert!(!linked.has_content);
+
+        let page = NewItem {
+            title: Some("全文検索の作り方".into()),
+            site_name: Some("Example Blog".into()),
+            excerpt: Some("概要".into()),
+            image_url: Some("https://blog.example.com/cover.png".into()),
+            content_html: Some("<p>形態素解析なしで検索する</p>".into()),
+            text: "形態素解析なしで検索する方法".into(),
+            ..Default::default()
+        };
+        db.save_linked_page(id, "https://blog.example.com/a?final", Ok(&page))
+            .unwrap();
+        assert_eq!(db.count_items_needing_link().unwrap(), 0);
+
+        let detail = db.get_item(id).unwrap().unwrap();
+        let linked = detail.item.linked.clone().unwrap();
+        assert!(linked.has_content && linked.error.is_none());
+        assert_eq!(linked.url, "https://blog.example.com/a?final");
+        assert_eq!(detail.linked_html.as_deref(), Some("<p>形態素解析なしで検索する</p>"));
+        let card = detail.item.link.clone().unwrap();
+        assert_eq!(
+            card.title.as_deref(),
+            Some("全文検索の作り方"),
+            "カードのタイトルを補う"
+        );
+
+        let search = |db: &Db, kw: &str| {
+            db.list_items(&ItemQuery {
+                keyword: Some(kw.into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .total
+        };
+        assert_eq!(search(&db, "形態素解析"), 1, "紹介先の本文でポストが見つかる");
+        assert_eq!(search(&db, "検索"), 1, "2 文字でも見つかる");
+        assert_eq!(search(&db, "Example Blog"), 1);
+
+        // あとから失敗しても、保存済みの本文は消さない
+        db.save_linked_page(id, "https://blog.example.com/a", Err("timeout"))
+            .unwrap();
+        let linked = db.get_item(id).unwrap().unwrap().item.linked.unwrap();
+        assert!(linked.has_content && linked.error.is_none());
+
+        // 紹介先のカバー画像も保存対象になる
+        let todo = db.media_urls_to_download(Some(&[id]), 10).unwrap();
+        assert!(todo.contains(&"https://blog.example.com/cover.png".to_string()));
+
+        db.delete_item(id).unwrap();
+        assert_eq!(search(&db, "形態素解析"), 0);
+    }
+
+    #[test]
+    fn migrates_v1_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let v: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(db.count_items_needing_link().unwrap(), 0, "linked_pages が作られている");
     }
 
     #[test]
