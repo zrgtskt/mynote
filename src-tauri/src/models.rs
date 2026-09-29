@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const KIND_TWEET: &str = "tweet";
 pub const KIND_ARTICLE: &str = "article";
+pub const KIND_IMAGE: &str = "image";
 
 /// ツイートに添付された画像・動画
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -82,6 +83,20 @@ pub struct NewItem {
     pub lang: Option<String>,
     pub published_at: Option<String>,
     pub raw_json: Option<String>,
+    /// 取り込んだ画像ファイル（データフォルダ内）
+    pub file: Option<ImageFile>,
+}
+
+/// 取り込んだ画像ファイルの情報
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageFile {
+    pub path: String,
+    pub thumb_path: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub mime: Option<String>,
+    pub size: Option<i64>,
 }
 
 /// どこから保存されたか
@@ -123,6 +138,7 @@ pub struct Item {
     pub has_content: bool,
     pub tags: Vec<String>,
     pub linked: Option<LinkedPage>,
+    pub file: Option<ImageFile>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -175,6 +191,7 @@ pub struct Stats {
     pub tweets: i64,
     pub articles: i64,
     pub manual: i64,
+    pub images: i64,
     pub untagged: i64,
     pub tags: i64,
 }

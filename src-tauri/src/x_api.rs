@@ -596,6 +596,7 @@ pub fn tweet_to_item(t: &TweetData, includes: &Includes) -> NewItem {
         lang: t.lang.clone(),
         published_at: t.created_at.clone(),
         raw_json: serde_json::to_string(t).ok(),
+        file: None,
     }
 }
 

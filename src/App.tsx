@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ImagePlus } from "lucide-react";
 import { api, errorMessage, onItemsChanged, onProgress } from "./api";
 import { AddUrlModal } from "./components/AddUrlModal";
 import { ItemDrawer } from "./components/ItemDrawer";
@@ -10,6 +11,7 @@ import { PickupView } from "./views/PickupView";
 import { SettingsView } from "./views/SettingsView";
 import { TagsView } from "./views/TagsView";
 import type { Filter, Progress, Settings, Sort, Stats, TagCount, TagMode } from "./types";
+import { imageFilesFrom, importImageFiles } from "./lib/imageImport";
 
 type ViewName = "pickup" | "items" | "tags" | "settings";
 
@@ -37,6 +39,8 @@ export default function App() {
   const [progress, setProgress] = useState<Progress | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const dragDepth = useRef(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -174,8 +178,72 @@ export default function App() {
     refreshAll();
   };
 
+  /** 画像ファイルを取り込む（ドロップ・選択・貼り付け共通） */
+  const importImages = useCallback(
+    async (files: File[]) => {
+      if (!files.length) return;
+      const willTag = !!settings?.hasAnthropicKey && !!settings?.autoTag;
+      const { items, errors } = await importImageFiles(files, (done, total) =>
+        setProgress({ task: "add", message: `画像を取り込み中…（${done}/${total}）`, current: done, total, done: done === total }),
+      );
+      if (items.length) {
+        toast("success", `画像 ${items.length} 枚を取り込みました${willTag ? "。Claude が仕分けしています…" : ""}`);
+        if (items.length === 1) setOpenId(items[0].id);
+      }
+      if (errors.length) toast("error", errors.slice(0, 4).join("\n") + (errors.length > 4 ? `\nほか ${errors.length - 4} 件` : ""));
+      // 取り込みの進捗表示を消す（その後に始まった仕分けの進捗は残す）
+      setTimeout(() => setProgress((p) => (p?.task === "add" && p.message.startsWith("画像を取り込み中") ? null : p)), 3000);
+      refreshAll();
+    },
+    [settings, toast, refreshAll],
+  );
+
+  // どこでも Ctrl/⌘+V で画像を貼り付けて取り込めるようにする
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const files = imageFilesFrom(e.clipboardData);
+      if (!files.length) return;
+      e.preventDefault();
+      setAdding(false);
+      importImages(files);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [importImages]);
+
+  const hasFiles = (e: React.DragEvent) => Array.from(e.dataTransfer.types).includes("Files");
+  const hasUrl = (e: React.DragEvent) => Array.from(e.dataTransfer.types).includes("text/uri-list");
+
   return (
-    <div className="app">
+    <div
+      className="app"
+      onDragEnter={(e) => {
+        if (!hasFiles(e) && !hasUrl(e)) return;
+        e.preventDefault();
+        dragDepth.current += 1;
+        setDragging(true);
+      }}
+      onDragOver={(e) => {
+        if (hasFiles(e) || hasUrl(e)) e.preventDefault();
+      }}
+      onDragLeave={() => {
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (dragDepth.current === 0) setDragging(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        dragDepth.current = 0;
+        setDragging(false);
+        const files = imageFilesFrom(e.dataTransfer);
+        if (files.length) {
+          importImages(files);
+          return;
+        }
+        // ブラウザからリンクや画像をドラッグしてきたときは URL として追加する
+        const url = e.dataTransfer.getData("text/uri-list").split("\n").find((l) => /^https?:\/\//.test(l.trim()));
+        if (url) addUrls([url.trim()]);
+      }}
+    >
       <Sidebar
         view={view}
         filter={filter}
@@ -261,7 +329,16 @@ export default function App() {
         />
       )}
 
-      {adding && <AddUrlModal onClose={() => setAdding(false)} onSubmit={addUrls} />}
+      {adding && <AddUrlModal onClose={() => setAdding(false)} onSubmit={addUrls} onImages={importImages} />}
+      {dragging && (
+        <div className="drop-overlay">
+          <div className="drop-card">
+            <ImagePlus />
+            <div className="drop-title">ドロップして取り込む</div>
+            <div className="muted">画像ファイル（JPEG・PNG・GIF・WebP）や、ブラウザからドラッグしたリンク</div>
+          </div>
+        </div>
+      )}
       <Toasts toasts={toasts} onClose={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
     </div>
   );

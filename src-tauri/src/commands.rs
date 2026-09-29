@@ -103,7 +103,43 @@ pub async fn set_note(core: CoreState<'_>, id: i64, note: String) -> Res<()> {
 
 #[tauri::command]
 pub async fn delete_item(core: CoreState<'_>, id: i64) -> Res<()> {
-    core.db().delete_item(id).map_err(err)
+    core.delete_item(id).map_err(err)
+}
+
+/// 画像ファイルを取り込む（画面でドロップ・選択・貼り付けされたもの）。仕分けは裏で行う。
+#[tauri::command]
+pub async fn import_image(
+    app: AppHandle,
+    core: CoreState<'_>,
+    name: Option<String>,
+    data: String,
+    modified_at: Option<String>,
+) -> Res<Item> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .map_err(|_| "画像データを読み取れません".to_string())?;
+    let item = core.import_image(bytes, name, None, modified_at).await.map_err(err)?;
+    notify_changed(&app);
+    let core = core.inner().clone();
+    let id = item.id;
+    tauri::async_runtime::spawn(async move {
+        core.postprocess(&[id]).await;
+        notify_changed(&app);
+    });
+    Ok(item)
+}
+
+/// 取り込んだ画像を、パソコンの既定のアプリで開く
+#[tauri::command]
+pub async fn open_item_file(app: AppHandle, core: CoreState<'_>, id: i64) -> Res<()> {
+    let path = core
+        .db()
+        .get_item(id)
+        .map_err(err)?
+        .and_then(|d| d.item.file.map(|f| f.path))
+        .ok_or_else(|| "画像ファイルがありません".to_string())?;
+    app.opener().open_path(path, None::<&str>).map_err(|e| e.to_string())
 }
 
 /// URL（記事または X のポスト）を追加する。画像保存とタグ付けは裏で行う。

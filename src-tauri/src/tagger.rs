@@ -20,7 +20,10 @@ pub const MAX_LINKED_CHARS: usize = 3000;
 /// 既存タグは使用数の多い順にこの数まで伝える
 const MAX_VOCAB: usize = 300;
 
-const SYSTEM_PROMPT: &str = "あなたは、ユーザーが X（旧 Twitter）や Web で保存したポスト・記事を整理するアシスタントです。\
+/// 画像に写っている文字の書き起こしは、この文字数までにしてもらう
+pub const MAX_TRANSCRIPT_CHARS: usize = 2000;
+
+const SYSTEM_PROMPT: &str = "あなたは、ユーザーが X（旧 Twitter）や Web で保存したポスト・記事・画像を整理するアシスタントです。\
 与えられた 1 件の内容に、あとで探しやすくなるタグを付け、内容を一文で要約してください。
 
 タグのルール:
@@ -50,10 +53,20 @@ impl std::error::Error for Refused {}
 pub struct TagResult {
     pub tags: Vec<String>,
     pub summary: String,
+    /// 画像に写っている文字の書き起こし（画像のときだけ）
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
-fn output_schema() -> Value {
-    json!({
+/// Claude に見せる画像（base64）
+#[derive(Clone, Copy, Debug)]
+pub struct ImageInput<'a> {
+    pub media_type: &'a str,
+    pub data: &'a str,
+}
+
+fn output_schema(with_text: bool) -> Value {
+    let mut schema = json!({
         "type": "object",
         "properties": {
             "tags": {
@@ -68,7 +81,15 @@ fn output_schema() -> Value {
         },
         "required": ["tags", "summary"],
         "additionalProperties": false
-    })
+    });
+    if with_text {
+        schema["properties"]["text"] = json!({
+            "type": "string",
+            "description": "画像に写っている文字の書き起こし。文字がなければ空文字"
+        });
+        schema["required"] = json!(["tags", "summary", "text"]);
+    }
+    schema
 }
 
 /// effort パラメーターを受け付けるモデルか
@@ -91,6 +112,10 @@ pub fn build_user_prompt(item: &Item, linked_text: Option<&str>, vocab: &[TagCou
         p.push_str("既存タグ: （まだありません）\n\n");
     } else {
         p.push_str(&format!("既存タグ: {}\n\n", names.join(", ")));
+    }
+
+    if item.kind == "image" {
+        return build_image_prompt(item, p);
     }
 
     p.push_str("<item>\n");
@@ -161,20 +186,58 @@ pub fn build_user_prompt(item: &Item, linked_text: Option<&str>, vocab: &[TagCou
     p
 }
 
-pub fn build_request(model: &str, item: &Item, linked_text: Option<&str>, vocab: &[TagCount]) -> Value {
+/// 画像ファイル用の指示（画像そのものは別のブロックで渡す）
+fn build_image_prompt(item: &Item, mut p: String) -> String {
+    p.push_str("<item>\n種類: 画像ファイル（この前に添付した画像）\n");
+    if let Some(t) = &item.title {
+        p.push_str(&format!("ファイル名: {t}\n"));
+    }
+    if let Some(site) = &item.site_name {
+        p.push_str(&format!("取得元: {site}\n"));
+    }
+    if let Some(note) = &item.note {
+        p.push_str(&format!("ユーザーのメモ: {note}\n"));
+    }
+    p.push_str("</item>\n\n");
+    p.push_str(&format!(
+        "画像の内容を見て仕分けしてください。\n\
+         - タグには、画像の種類（写真・スクリーンショット・イラスト・図解・グラフ・漫画・メモ など）を 1 つ含め、残りは写っている内容の主題にする\n\
+         - summary には、何が写っている画像かを 1 文で書く\n\
+         - text には、画像に写っている文字を書き起こす（読めない・文字がない場合は空文字）。{MAX_TRANSCRIPT_CHARS} 文字を超える場合は主要な部分だけにする"
+    ));
+    p
+}
+
+pub fn build_request(
+    model: &str,
+    item: &Item,
+    linked_text: Option<&str>,
+    image: Option<ImageInput<'_>>,
+    vocab: &[TagCount],
+) -> Value {
     let mut output_config = json!({
-        "format": {"type": "json_schema", "schema": output_schema()}
+        "format": {"type": "json_schema", "schema": output_schema(image.is_some())}
     });
     if supports_effort(model) {
         // 分類なので深く考える必要はない
         output_config["effort"] = json!("low");
     }
+    let prompt = build_user_prompt(item, linked_text, vocab);
+    // 画像は指示より前に置く（そのほうが読み取りの精度がよい）
+    let content = match image {
+        Some(img) => json!([
+            {"type": "image", "source": {"type": "base64", "media_type": img.media_type, "data": img.data}},
+            {"type": "text", "text": prompt}
+        ]),
+        None => json!(prompt),
+    };
     let mut body = json!({
         "model": model,
-        "max_tokens": 4000,
+        // 画像は文字の書き起こしがあるので多めに
+        "max_tokens": if image.is_some() { 8000 } else { 4000 },
         "system": SYSTEM_PROMPT,
         "output_config": output_config,
-        "messages": [{"role": "user", "content": build_user_prompt(item, linked_text, vocab)}]
+        "messages": [{"role": "user", "content": content}]
     });
     if supports_default_fallback(model) {
         // 安全分類器で断られたとき、サーバー側で推奨モデルに切り替えて再実行する
@@ -200,6 +263,7 @@ pub fn parse_response(body: &Value) -> Result<TagResult> {
     let mut r: TagResult = serde_json::from_str(text.trim()).context("Claude の応答を JSON として読めません")?;
     r.tags.truncate(5);
     r.summary = r.summary.trim().to_string();
+    r.text = r.text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
     Ok(r)
 }
 
@@ -223,9 +287,10 @@ pub async fn tag_item(
     model: &str,
     item: &Item,
     linked_text: Option<&str>,
+    image: Option<ImageInput<'_>>,
     vocab: &[TagCount],
 ) -> Result<TagResult> {
-    let body = build_request(model, item, linked_text, vocab);
+    let body = build_request(model, item, linked_text, image, vocab);
     let mut attempt = 0;
     loop {
         attempt += 1;
@@ -302,7 +367,47 @@ mod tests {
             has_content: false,
             tags: vec![],
             linked: None,
+            file: None,
         }
+    }
+
+    #[test]
+    fn image_request_puts_image_first_and_asks_for_transcript() {
+        let mut it = item("image", "");
+        it.title = Some("スクリーンショット 2026-09-29".into());
+        let img = ImageInput {
+            media_type: "image/png",
+            data: "iVBORw0KGgo=",
+        };
+        let body = build_request(
+            DEFAULT_MODEL,
+            &it,
+            None,
+            Some(img),
+            &[TagCount {
+                name: "料理".into(),
+                count: 2,
+            }],
+        );
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["type"], "base64");
+        let prompt = content[1]["text"].as_str().unwrap();
+        assert!(prompt.contains("画像ファイル") && prompt.contains("スクリーンショット 2026-09-29"));
+        assert!(prompt.contains("既存タグ: 料理"));
+        assert!(!prompt.contains("本文:"), "画像では本文を送らない");
+        let schema = &body["output_config"]["format"]["schema"];
+        assert_eq!(schema["required"], json!(["tags", "summary", "text"]));
+        assert_eq!(body["max_tokens"], 8000);
+
+        let resp = json!({"stop_reason": "end_turn", "content": [{"type": "text",
+            "text": "{\"tags\": [\"スクリーンショット\", \"料理\"], \"summary\": \"レシピの画面\", \"text\": \"  材料: 玉ねぎ  \"}"}]});
+        let r = parse_response(&resp).unwrap();
+        assert_eq!(r.text.as_deref(), Some("材料: 玉ねぎ"));
+        let resp = json!({"stop_reason": "end_turn", "content": [{"type": "text",
+            "text": "{\"tags\": [\"写真\"], \"summary\": \"海\", \"text\": \"\"}"}]});
+        assert_eq!(parse_response(&resp).unwrap().text, None, "文字がなければ None");
     }
 
     #[test]
@@ -333,7 +438,7 @@ mod tests {
             name: "Rust".into(),
             count: 3,
         }];
-        let body = build_request(DEFAULT_MODEL, &item("tweet", "Tauri 2 がリリース"), None, &vocab);
+        let body = build_request(DEFAULT_MODEL, &item("tweet", "Tauri 2 がリリース"), None, None, &vocab);
         assert_eq!(body["model"], "claude-opus-5-5");
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(body["output_config"]["effort"], "low");
@@ -350,7 +455,7 @@ mod tests {
 
     #[test]
     fn request_for_haiku_omits_unsupported_params() {
-        let body = build_request("claude-haiku-4-5", &item("tweet", "x"), None, &[]);
+        let body = build_request("claude-haiku-4-5", &item("tweet", "x"), None, None, &[]);
         assert!(body["output_config"].get("effort").is_none());
         assert!(body.get("fallbacks").is_none());
     }

@@ -34,9 +34,19 @@ export interface LinkedPage {
   hasContent: boolean;
 }
 
+/** 取り込んだ画像ファイル */
+export interface ImageFile {
+  path: string;
+  thumbPath?: string | null;
+  width?: number | null;
+  height?: number | null;
+  mime?: string | null;
+  size?: number | null;
+}
+
 export interface Item {
   id: number;
-  kind: "tweet" | "article";
+  kind: "tweet" | "article" | "image";
   url: string;
   externalId?: string | null;
   title?: string | null;
@@ -63,6 +73,7 @@ export interface Item {
   hasContent: boolean;
   tags: string[];
   linked?: LinkedPage | null;
+  file?: ImageFile | null;
 }
 
 export interface ItemDetail extends Item {
@@ -71,7 +82,7 @@ export interface ItemDetail extends Item {
   linkedText?: string | null;
 }
 
-export type Filter = "all" | "liked" | "bookmarked" | "tweet" | "article" | "manual" | "untagged";
+export type Filter = "all" | "liked" | "bookmarked" | "tweet" | "article" | "image" | "manual" | "untagged";
 export type Sort = "saved_desc" | "saved_asc" | "published_desc" | "random";
 export type TagMode = "and" | "or";
 
@@ -102,6 +113,7 @@ export interface Stats {
   tweets: number;
   articles: number;
   manual: number;
+  images: number;
   untagged: number;
   tags: number;
 }

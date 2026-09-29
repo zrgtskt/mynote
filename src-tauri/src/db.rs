@@ -10,7 +10,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 
 use crate::models::*;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS items (
@@ -103,10 +103,24 @@ CREATE TABLE IF NOT EXISTS linked_pages (
 );
 "#;
 
+/// v3: 取り込んだ画像ファイル
+const SCHEMA_V3: &str = r#"
+ALTER TABLE items ADD COLUMN file_path TEXT;
+ALTER TABLE items ADD COLUMN thumb_path TEXT;
+ALTER TABLE items ADD COLUMN width INTEGER;
+ALTER TABLE items ADD COLUMN height INTEGER;
+ALTER TABLE items ADD COLUMN mime TEXT;
+ALTER TABLE items ADD COLUMN file_size INTEGER;
+"#;
+
 /// 一覧・詳細で共通の SELECT 列。text は一覧では切り詰める。
 const ITEM_COLUMNS: &str = "id, kind, url, external_id, title, author_name, author_handle, author_avatar, \
      site_name, {TEXT}, excerpt, summary, image_url, media_json, link_json, metrics_json, published_at, \
-     saved_at, is_liked, is_bookmarked, is_manual, ai_tagged_at, note, content_html IS NOT NULL AND content_html <> ''";
+     saved_at, is_liked, is_bookmarked, is_manual, ai_tagged_at, note, content_html IS NOT NULL AND content_html <> '', \
+     file_path, thumb_path, width, height, mime, file_size";
+
+/// ITEM_COLUMNS の列数（詳細ではこの後ろに content_html を足す）
+const ITEM_COLUMN_COUNT: usize = 30;
 
 /// 一覧で返す本文の最大文字数
 const LIST_TEXT_CHARS: i64 = 600;
@@ -146,6 +160,9 @@ impl Db {
         }
         if version < 2 {
             conn.execute_batch(SCHEMA_V2)?;
+        }
+        if version < 3 {
+            conn.execute_batch(SCHEMA_V3)?;
         }
         if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -202,7 +219,7 @@ impl Db {
             .conn
             .query_row(&sql, [id], |r| {
                 let item = row_to_item(r)?;
-                let html: Option<String> = r.get(24)?;
+                let html: Option<String> = r.get(ITEM_COLUMN_COUNT)?;
                 Ok((item, html))
             })
             .optional()?;
@@ -228,11 +245,28 @@ impl Db {
         }))
     }
 
-    pub fn delete_item(&mut self, id: i64) -> Result<()> {
+    /// 削除する。取り込んだ画像ファイルがあれば、そのパス（元画像とサムネイル）を返す。
+    pub fn delete_item(&mut self, id: i64) -> Result<Vec<String>> {
         let tx = self.conn.transaction()?;
+        let files: Vec<String> = tx
+            .query_row("SELECT file_path, thumb_path FROM items WHERE id = ?1", [id], |r| {
+                Ok([r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?])
+            })
+            .optional()?
+            .map(|f| f.into_iter().flatten().collect())
+            .unwrap_or_default();
         tx.execute("DELETE FROM items_fts WHERE rowid = ?1", [id])?;
         tx.execute("DELETE FROM items WHERE id = ?1", [id])?;
         delete_orphan_tags(&tx)?;
+        tx.commit()?;
+        Ok(files)
+    }
+
+    /// 本文を書き換える（画像に写っている文字の書き起こしなど）
+    pub fn set_text(&mut self, id: i64, text: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("UPDATE items SET text = ?2 WHERE id = ?1", params![id, text.trim()])?;
+        reindex_tx(&tx, id)?;
         tx.commit()?;
         Ok(())
     }
@@ -524,7 +558,7 @@ impl Db {
             "SELECT COUNT(*), \
                 COALESCE(SUM(is_liked), 0), COALESCE(SUM(is_bookmarked), 0), \
                 COALESCE(SUM(kind = 'tweet'), 0), COALESCE(SUM(kind = 'article'), 0), \
-                COALESCE(SUM(is_manual), 0), \
+                COALESCE(SUM(is_manual), 0), COALESCE(SUM(kind = 'image'), 0), \
                 COALESCE(SUM(NOT EXISTS (SELECT 1 FROM item_tags it WHERE it.item_id = items.id)), 0), \
                 (SELECT COUNT(*) FROM tags) \
              FROM items",
@@ -537,8 +571,9 @@ impl Db {
                     tweets: r.get(3)?,
                     articles: r.get(4)?,
                     manual: r.get(5)?,
-                    untagged: r.get(6)?,
-                    tags: r.get(7)?,
+                    images: r.get(6)?,
+                    untagged: r.get(7)?,
+                    tags: r.get(8)?,
                 })
             },
         )?)
@@ -860,6 +895,19 @@ fn row_to_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         has_content: r.get::<_, i64>(23).map(|v| v != 0).unwrap_or(false),
         tags: vec![],
         linked: None,
+        file: r
+            .get::<_, Option<String>>(24)?
+            .map(|path| -> rusqlite::Result<ImageFile> {
+                Ok(ImageFile {
+                    path,
+                    thumb_path: r.get(25)?,
+                    width: r.get(26)?,
+                    height: r.get(27)?,
+                    mime: r.get(28)?,
+                    size: r.get(29)?,
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -896,10 +944,12 @@ fn upsert_item_tx(
     tx.execute(
         "INSERT INTO items (key, kind, url, external_id, title, author_name, author_handle, author_avatar, site_name, \
             text, content_html, excerpt, image_url, media_json, link_json, metrics_json, lang, published_at, \
-            saved_at, updated_at, is_liked, is_bookmarked, is_manual, raw_json) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24) \
+            saved_at, updated_at, is_liked, is_bookmarked, is_manual, raw_json, \
+            file_path, thumb_path, width, height, mime, file_size) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
+            ?25, ?26, ?27, ?28, ?29, ?30) \
          ON CONFLICT(key) DO UPDATE SET \
-            url = excluded.url, \
+            url = CASE WHEN excluded.url <> '' THEN excluded.url ELSE items.url END, \
             title = COALESCE(excluded.title, items.title), \
             author_name = COALESCE(excluded.author_name, items.author_name), \
             author_handle = COALESCE(excluded.author_handle, items.author_handle), \
@@ -918,7 +968,13 @@ fn upsert_item_tx(
             is_liked = MAX(items.is_liked, excluded.is_liked), \
             is_bookmarked = MAX(items.is_bookmarked, excluded.is_bookmarked), \
             is_manual = MAX(items.is_manual, excluded.is_manual), \
-            raw_json = COALESCE(excluded.raw_json, items.raw_json)",
+            raw_json = COALESCE(excluded.raw_json, items.raw_json), \
+            file_path = COALESCE(excluded.file_path, items.file_path), \
+            thumb_path = COALESCE(excluded.thumb_path, items.thumb_path), \
+            width = COALESCE(excluded.width, items.width), \
+            height = COALESCE(excluded.height, items.height), \
+            mime = COALESCE(excluded.mime, items.mime), \
+            file_size = COALESCE(excluded.file_size, items.file_size)",
         params![
             item.key,
             item.kind,
@@ -944,6 +1000,12 @@ fn upsert_item_tx(
             flags.bookmarked as i64,
             flags.manual as i64,
             item.raw_json,
+            item.file.as_ref().map(|f| f.path.clone()),
+            item.file.as_ref().and_then(|f| f.thumb_path.clone()),
+            item.file.as_ref().and_then(|f| f.width),
+            item.file.as_ref().and_then(|f| f.height),
+            item.file.as_ref().and_then(|f| f.mime.clone()),
+            item.file.as_ref().and_then(|f| f.size),
         ],
     )?;
 
@@ -1031,6 +1093,7 @@ fn build_where(q: &ItemQuery) -> (String, Vec<SqlValue>) {
         Some("bookmarked") => conds.push("i.is_bookmarked = 1".into()),
         Some("tweet") => conds.push("i.kind = 'tweet'".into()),
         Some("article") => conds.push("i.kind = 'article'".into()),
+        Some("image") => conds.push("i.kind = 'image'".into()),
         Some("manual") => conds.push("i.is_manual = 1".into()),
         Some("untagged") => conds.push("NOT EXISTS (SELECT 1 FROM item_tags it WHERE it.item_id = i.id)".into()),
         _ => {}

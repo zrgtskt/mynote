@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::db::{now_iso, Db};
 use crate::models::*;
 use crate::x_api::{self, ApiError, Collection};
-use crate::{article, tagger};
+use crate::{article, images, tagger};
 
 pub const IDENTIFIER: &str = "dev.mynote.desktop";
 
@@ -48,6 +48,12 @@ const INCREMENTAL_FIRST_PAGE: i64 = 20;
 const MAX_MEDIA_BYTES: usize = 15 * 1024 * 1024;
 
 pub type ProgressFn = Box<dyn Fn(Progress) + Send + Sync>;
+
+/// URL を取得した結果
+enum Fetched {
+    Item(Box<NewItem>),
+    Image { bytes: Vec<u8>, final_url: String },
+}
 
 /// 同期・追加のあとの処理の結果
 #[derive(Debug, Default)]
@@ -492,7 +498,23 @@ impl Core {
         self.emit("add", "取得中…", 0, 1, false);
         let result = self.fetch_url_item(raw).await;
         let item = match result {
-            Ok(it) => it,
+            Ok(Fetched::Item(it)) => *it,
+            Ok(Fetched::Image { bytes, final_url }) => {
+                // URL が画像ファイルそのものだったときは、画像として取り込む
+                let item = self.import_image(bytes, None, Some(final_url), None).await;
+                self.emit(
+                    "add",
+                    if item.is_ok() {
+                        "追加しました"
+                    } else {
+                        "追加できませんでした"
+                    },
+                    1,
+                    1,
+                    true,
+                );
+                return item;
+            }
             Err(e) => {
                 self.emit("add", format!("追加できませんでした: {e}"), 1, 1, true);
                 return Err(e);
@@ -508,19 +530,117 @@ impl Core {
         Ok(detail.item)
     }
 
-    async fn fetch_url_item(&self, raw: &str) -> Result<NewItem> {
+    async fn fetch_url_item(&self, raw: &str) -> Result<Fetched> {
         if let Some(id) = x_api::tweet_id_from_url(raw) {
-            if self.x_connected() {
+            let item = if self.x_connected() {
                 let body = self
                     .x_get(&format!("/tweets/{id}"), &x_api::single_tweet_query())
                     .await?;
-                x_api::parse_single(&body)
+                x_api::parse_single(&body)?
             } else {
-                x_api::fetch_oembed(&self.http, raw, &id).await
-            }
-        } else {
-            article::fetch(&self.http, raw).await.map(|f| f.item)
+                x_api::fetch_oembed(&self.http, raw, &id).await?
+            };
+            return Ok(Fetched::Item(Box::new(item)));
         }
+        Ok(match article::fetch_resource(&self.http, raw).await? {
+            article::Resource::Page(f) => Fetched::Item(Box::new(f.item)),
+            article::Resource::Image { bytes, final_url } => Fetched::Image { bytes, final_url },
+        })
+    }
+
+    // ------------------------------------------------------------ 画像ファイル
+
+    pub fn images_dir(&self) -> PathBuf {
+        self.data_dir.join("images")
+    }
+
+    /// 画像ファイルを取り込む。中身が同じ画像は 1 つにまとめる。
+    /// name は元のファイル名、source_url は取得元（Web の画像なら）、modified_at はファイルの更新日時。
+    pub async fn import_image(
+        &self,
+        bytes: Vec<u8>,
+        name: Option<String>,
+        source_url: Option<String>,
+        modified_at: Option<String>,
+    ) -> Result<Item> {
+        let dir = self.images_dir();
+        let stored = tokio::task::spawn_blocking(move || images::store(&bytes, &dir))
+            .await
+            .map_err(|e| anyhow!("画像の処理に失敗しました: {e}"))??;
+        let url_name = source_url
+            .as_deref()
+            .and_then(|u| url::Url::parse(u).ok())
+            .and_then(|u| u.path_segments().and_then(|mut s| s.next_back().map(str::to_string)));
+        let title = name
+            .or(url_name)
+            .map(|n| images::title_from_name(&n))
+            .filter(|t| !t.is_empty());
+        let site_name = source_url
+            .as_deref()
+            .and_then(|u| url::Url::parse(u).ok())
+            .and_then(|u| u.host_str().map(|h| h.trim_start_matches("www.").to_string()));
+        let item = NewItem {
+            key: format!("image:{}", stored.hash),
+            kind: KIND_IMAGE.into(),
+            url: source_url.unwrap_or_default(),
+            title,
+            site_name,
+            published_at: modified_at,
+            file: Some(ImageFile {
+                path: stored.file_path.display().to_string(),
+                thumb_path: Some(stored.thumb_path.display().to_string()),
+                width: Some(stored.width as i64),
+                height: Some(stored.height as i64),
+                mime: Some(stored.mime.to_string()),
+                size: Some(stored.size as i64),
+            }),
+            ..Default::default()
+        };
+        let flags = SourceFlags {
+            manual: true,
+            ..Default::default()
+        };
+        let id = self.db().upsert_item(&item, flags, &now_iso())?.id;
+        self.db()
+            .get_item(id)?
+            .map(|d| d.item)
+            .ok_or_else(|| anyhow!("保存に失敗しました"))
+    }
+
+    /// パスのファイルを画像として取り込む（CLI 用）
+    pub async fn import_image_file(&self, path: &std::path::Path) -> Result<Item> {
+        let bytes = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("ファイルを読めません: {}", path.display()))?;
+        let modified = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(|t| DateTime::<Utc>::from(t).to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string());
+        self.import_image(bytes, name, None, modified).await
+    }
+
+    /// アイテムを削除する。取り込んだ画像ファイルも消す（データフォルダ内のものだけ）。
+    pub fn delete_item(&self, id: i64) -> Result<()> {
+        let files = self.db().delete_item(id)?;
+        let dir = self.images_dir();
+        for f in files {
+            let p = PathBuf::from(&f);
+            if p.starts_with(&dir) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        Ok(())
+    }
+
+    /// タグ付けのために画像を Claude に送れる形にする
+    async fn image_for_claude(&self, item: &Item) -> Result<Option<(String, String)>> {
+        let Some(file) = &item.file else { return Ok(None) };
+        let path = PathBuf::from(&file.path);
+        let prepared = tokio::task::spawn_blocking(move || images::for_claude(&path))
+            .await
+            .map_err(|e| anyhow!("画像の処理に失敗しました: {e}"))??;
+        Ok(Some(prepared))
     }
 
     // ------------------------------------------------------------ タグ付け
@@ -554,12 +674,24 @@ impl Core {
                 (db.item_for_tagging(id)?, db.list_tags()?)
             };
             let Some((item, linked_text)) = item else { continue };
-            match tagger::tag_item(&self.http, &key, &model, &item, linked_text.as_deref(), &vocab).await {
+            let result = match self.image_for_claude(&item).await {
+                Ok(image) => {
+                    let image = image
+                        .as_ref()
+                        .map(|(media_type, data)| tagger::ImageInput { media_type, data });
+                    tagger::tag_item(&self.http, &key, &model, &item, linked_text.as_deref(), image, &vocab).await
+                }
+                Err(e) => Err(e),
+            };
+            match result {
                 Ok(r) => {
                     let mut db = self.db();
                     db.add_item_tags(id, &r.tags, "ai")?;
                     if !r.summary.is_empty() {
                         db.set_summary(id, &r.summary)?;
+                    }
+                    if let (Some(text), true) = (&r.text, item.kind == KIND_IMAGE) {
+                        db.set_text(id, text)?;
                     }
                     db.mark_ai_tagged(id)?;
                     report.tagged += 1;
@@ -602,13 +734,20 @@ impl Core {
             (db.item_for_tagging(id)?, db.list_tags()?)
         };
         let (item, linked_text) = item.ok_or_else(|| anyhow!("アイテムが見つかりません"))?;
-        let r = tagger::tag_item(&self.http, &key, &model, &item, linked_text.as_deref(), &vocab).await?;
+        let image = self.image_for_claude(&item).await?;
+        let image = image
+            .as_ref()
+            .map(|(media_type, data)| tagger::ImageInput { media_type, data });
+        let r = tagger::tag_item(&self.http, &key, &model, &item, linked_text.as_deref(), image, &vocab).await?;
         {
             let mut db = self.db();
             db.remove_ai_tags(id)?;
             db.add_item_tags(id, &r.tags, "ai")?;
             if !r.summary.is_empty() {
                 db.set_summary(id, &r.summary)?;
+            }
+            if let (Some(text), true) = (&r.text, item.kind == KIND_IMAGE) {
+                db.set_text(id, text)?;
             }
             db.mark_ai_tagged(id)?;
         }
@@ -930,6 +1069,112 @@ mod tests {
         assert_eq!(c.fetch_linked_pages(None, true).await.unwrap(), 0);
         assert!(c.refetch_linked_page(ng_id).await.is_err());
         assert!(c.refetch_linked_page(ok_id).await.is_ok());
+    }
+
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 90]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    #[tokio::test]
+    async fn imports_images_dedups_and_deletes_files() {
+        let (c, _d) = core();
+        let bytes = png_bytes(1200, 800);
+        let item = c
+            .import_image(
+                bytes.clone(),
+                Some("レシピ メモ.png".into()),
+                None,
+                Some("2026-09-01T10:00:00Z".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(item.kind, "image");
+        assert_eq!(item.title.as_deref(), Some("レシピ メモ"));
+        assert!(item.is_manual);
+        let file = item.file.clone().unwrap();
+        assert_eq!(
+            (file.width, file.height, file.mime.as_deref()),
+            (Some(1200), Some(800), Some("image/png"))
+        );
+        assert!(std::path::Path::new(&file.path).exists());
+        assert!(std::path::Path::new(file.thumb_path.as_ref().unwrap()).exists());
+
+        // 同じ画像を別名で取り込んでも 1 件にまとまる
+        let again = c
+            .import_image(bytes, Some("copy.png".into()), None, None)
+            .await
+            .unwrap();
+        assert_eq!(again.id, item.id);
+        let s = c.db().stats().unwrap();
+        assert_eq!((s.total, s.images), (1, 1));
+        let listed = c
+            .db()
+            .list_items(&ItemQuery {
+                filter: Some("image".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(listed.total, 1);
+
+        // 書き起こした文字で検索できる
+        c.db().set_text(item.id, "材料 玉ねぎ にんじん").unwrap();
+        let hits = c
+            .db()
+            .list_items(&ItemQuery {
+                keyword: Some("にんじん".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hits.total, 1);
+
+        // 形式が違うものは取り込まない
+        assert!(c
+            .import_image(b"GIF89a-broken".to_vec(), None, None, None)
+            .await
+            .is_err());
+        assert!(c.import_image(b"hello".to_vec(), None, None, None).await.is_err());
+
+        c.delete_item(item.id).unwrap();
+        assert!(
+            !std::path::Path::new(&file.path).exists(),
+            "削除すると画像ファイルも消える"
+        );
+        assert!(!std::path::Path::new(file.thumb_path.as_ref().unwrap()).exists());
+    }
+
+    /// 画像の URL を追加すると、画像として取り込まれる
+    #[tokio::test]
+    async fn adding_an_image_url_imports_the_image() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let body = png_bytes(64, 48);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = body.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 2048];
+                let _ = sock.read(&mut buf).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    served.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&served).await;
+            }
+        });
+        let (c, _d) = core();
+        let url = format!("http://127.0.0.1:{port}/photos/cat.png?utm_source=x");
+        let item = c.add_url(&url).await.unwrap();
+        assert_eq!(item.kind, "image");
+        assert_eq!(item.title.as_deref(), Some("cat"));
+        assert_eq!(item.site_name.as_deref(), Some("127.0.0.1"));
+        assert!(item.url.starts_with("http://127.0.0.1"));
+        assert_eq!(item.file.unwrap().width, Some(64));
     }
 
     #[test]

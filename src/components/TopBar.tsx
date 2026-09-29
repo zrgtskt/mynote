@@ -57,7 +57,7 @@ export const TopBar = forwardRef<HTMLInputElement, Props>(function TopBar({ keyw
       )}
       <button className="btn btn-primary" onClick={onAdd}>
         <Plus />
-        URL を追加
+        追加
       </button>
     </header>
   );

@@ -1,7 +1,7 @@
 //! 画面を開かずに使うコマンド（cron などから毎日の同期に使う）
 //!
 //!   mynote sync [--full]   X のいいね・ブックマークを同期して、画像保存とタグ付けまで行う
-//!   mynote add <URL>...    記事や X のポストを追加する
+//!   mynote add <URL|画像>... 記事・X のポスト・画像ファイルを追加する
 //!   mynote links           ポストの紹介先ページをまとめて保存する
 //!   mynote tag             まだ AI タグ付けしていないものをタグ付けする
 
@@ -13,7 +13,7 @@ const HELP: &str = "mynote — X のいいね・ブックマークと Web 記事
 使い方:
   mynote                 アプリを開く
   mynote sync [--full]   X のいいね・ブックマークを同期（--full で全件を取り直す）
-  mynote add <URL>...    記事や X のポストを追加
+  mynote add <URL|画像>... 記事・X のポスト・画像ファイルを追加
   mynote links [--retry] ポストの紹介先ページをまとめて保存（--retry で失敗分も再取得）
   mynote tag             未タグ付けのものを Claude でタグ付け
   mynote help            このヘルプ
@@ -101,7 +101,14 @@ pub fn run(args: &[String]) -> i32 {
                 let mut code = 0;
                 let mut ids = Vec::new();
                 for u in urls {
-                    match core.add_url(u).await {
+                    // 手元のファイルなら画像として取り込む
+                    let path = std::path::Path::new(u);
+                    let result = if path.is_file() {
+                        core.import_image_file(path).await
+                    } else {
+                        core.add_url(u).await
+                    };
+                    match result {
                         Ok(item) => {
                             println!("追加: {}", item.title.as_deref().unwrap_or(&item.url));
                             ids.push(item.id);

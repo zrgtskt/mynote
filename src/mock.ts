@@ -189,6 +189,69 @@ const items: Item[] = [
   }),
 ];
 
+// 取り込んだ画像のサンプル
+const screenshot = svg(
+  `<rect width="720" height="1280" fill="#0f172a"/><rect x="0" y="0" width="720" height="120" fill="#1e293b"/>
+   <text x="40" y="78" font-size="36" font-family="sans-serif" font-weight="700" fill="#e2e8f0">材料（2人分）</text>
+   ${["玉ねぎ 1個", "トマト缶 1缶", "鶏もも肉 300g", "カレー粉 大さじ2", "塩 少々"].map((t, i) => `<text x="60" y="${220 + i * 90}" font-size="40" font-family="sans-serif" fill="#cbd5e1">・${t}</text>`).join("")}
+   <rect x="40" y="760" width="640" height="360" rx="24" fill="#f59e0b" fill-opacity="0.25"/>
+   <text x="80" y="840" font-size="34" font-family="sans-serif" fill="#fde68a">弱火で 30 分煮込む</text>`,
+  720,
+  1280,
+);
+const photo = svg(
+  `<defs><linearGradient id="s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fb923c"/><stop offset="0.55" stop-color="#f472b6"/><stop offset="1" stop-color="#1e1b4b"/></linearGradient></defs>
+   <rect width="1200" height="800" fill="url(#s)"/><circle cx="600" cy="470" r="110" fill="#fde68a" fill-opacity="0.9"/>
+   <rect y="560" width="1200" height="240" fill="#0f172a" fill-opacity="0.85"/>`,
+  1200,
+  800,
+);
+const diagram = svg(
+  `<rect width="1000" height="640" fill="#f8fafc"/>
+   ${[["フロント", 80], ["Rust", 400], ["SQLite", 720]].map(([t, x]) => `<rect x="${x}" y="250" width="200" height="120" rx="18" fill="#6366f1"/><text x="${Number(x) + 100}" y="320" font-size="30" font-family="sans-serif" fill="white" text-anchor="middle">${t}</text>`).join("")}
+   <path d="M280 310 H400 M600 310 H720" stroke="#334155" stroke-width="6"/>`,
+  1000,
+  640,
+);
+items.push(
+  base({
+    kind: "image",
+    url: "",
+    title: "スクリーンショット 2026-09-27 12.04.33",
+    text: "材料（2人分）\n・玉ねぎ 1個\n・トマト缶 1缶\n・鶏もも肉 300g\n・カレー粉 大さじ2\n・塩 少々\n弱火で 30 分煮込む",
+    summary: "チキンカレーの材料と煮込み時間をまとめたレシピ画面",
+    file: { path: screenshot, width: 720, height: 1280, mime: "image/png", size: 348_000 },
+    isManual: true,
+    aiTaggedAt: ago(40),
+    tags: ["スクリーンショット", "料理", "レシピ"],
+    publishedAt: ago(48),
+  }),
+  base({
+    kind: "image",
+    url: "",
+    title: "IMG_2041",
+    summary: "海に沈む夕日とピンク色に染まった空",
+    file: { path: photo, width: 1200, height: 800, mime: "image/jpeg", size: 2_400_000 },
+    isManual: true,
+    aiTaggedAt: ago(60),
+    tags: ["写真", "旅行"],
+    publishedAt: ago(200),
+  }),
+  base({
+    kind: "image",
+    url: "https://example.com/arch.png",
+    siteName: "example.com",
+    title: "arch",
+    text: "フロント Rust SQLite",
+    summary: "フロントエンド・Rust・SQLite の 3 層構成を示した図",
+    file: { path: diagram, width: 1000, height: 640, mime: "image/png", size: 52_000 },
+    isManual: true,
+    aiTaggedAt: ago(80),
+    tags: ["図解", "Rust", "SQLite"],
+    publishedAt: ago(90),
+  }),
+);
+
 // 無限スクロールの確認用に件数を増やす
 const topics = ["読書メモ", "プログラミング", "写真", "料理", "旅行", "投資", "デザイン", "音楽"];
 for (let i = 0; i < 70; i++) {
@@ -246,6 +309,7 @@ function matches(it: Item, q: ItemQuery): boolean {
     case "bookmarked": if (!it.isBookmarked) return false; break;
     case "tweet": if (it.kind !== "tweet") return false; break;
     case "article": if (it.kind !== "article") return false; break;
+    case "image": if (it.kind !== "image") return false; break;
     case "manual": if (!it.isManual) return false; break;
     case "untagged": if (it.tags.length) return false; break;
   }
@@ -316,6 +380,7 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
     tweets: items.filter((i) => i.kind === "tweet").length,
     articles: items.filter((i) => i.kind === "article").length,
     manual: items.filter((i) => i.isManual).length,
+    images: items.filter((i) => i.kind === "image").length,
     untagged: items.filter((i) => !i.tags.length).length,
     tags: tagCounts().length,
   }),
@@ -345,6 +410,29 @@ const handlers: Record<string, (args: Record<string, any>) => unknown> = {
     emit("progress", { task: "add", message: "追加しました", current: 1, total: 1, done: true });
     return it;
   },
+  import_image: async ({ name, data, modifiedAt }) => {
+    await sleep(300);
+    const mime = data.startsWith("/9j/") ? "image/jpeg" : "image/png";
+    const it = base({
+      kind: "image",
+      url: "",
+      title: String(name).replace(/\.[^.]+$/, ""),
+      file: { path: `data:${mime};base64,${data}`, mime, size: Math.round((data.length * 3) / 4) },
+      isManual: true,
+      publishedAt: modifiedAt ?? null,
+      savedAt: new Date().toISOString(),
+    });
+    items.unshift(it);
+    // Claude の仕分けを模擬する
+    setTimeout(() => {
+      it.tags = ["スクリーンショット"];
+      it.summary = "取り込んだ画像（仮データでの仕分け結果）";
+      it.aiTaggedAt = new Date().toISOString();
+      emit("items-changed", null);
+    }, 1500);
+    return it;
+  },
+  open_item_file: () => undefined,
   tag_pending: async () => ({ tagged: 1, failed: 0, errors: [] }),
   count_pending_tags: () => items.filter((i) => !i.aiTaggedAt && !i.tags.length).length,
   retag_item: async ({ id }) => {

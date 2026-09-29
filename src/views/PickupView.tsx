@@ -103,12 +103,12 @@ export function PickupView({ refreshKey, stats, onOpen, onTag, onAdd, onSettings
                 <SettingsIcon /> X と連携する
               </button>
               <button className="btn" onClick={onAdd}>
-                <Plus /> URL を追加
+                <Plus /> 追加
               </button>
             </div>
           }
         >
-          X のいいね・ブックマークを同期するか、気になった記事の URL を追加すると、ここに毎日ピックアップされます。
+          X のいいね・ブックマークを同期するか、気になった記事の URL や画像を追加すると、ここに毎日ピックアップされます。
         </EmptyState>
       ) : (
         <div className="pickup-grid">

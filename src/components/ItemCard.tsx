@@ -27,7 +27,7 @@ export function Sources({ item }: { item: Item }) {
           <Bookmark fill="currentColor" />
         </span>
       )}
-      {item.isManual && (
+      {item.isManual && item.kind !== "image" && (
         <span className="source-dot manual" title="手動で追加">
           <Link2 />
         </span>
@@ -100,7 +100,62 @@ function TagChips({ tags, active, onTag }: { tags: string[]; active?: string[]; 
   );
 }
 
-function ItemCardInner({ item, terms = [], activeTags, onOpen, onTag, style }: Props) {
+/** 取り込んだ画像のカード */
+function ImageCard({ item, terms = [], activeTags, onOpen, onTag, style }: Props) {
+  const f = item.file;
+  const src = mediaSrc(f?.thumbPath ?? f?.path, null);
+  const ratio = f?.width && f?.height ? `${f.width} / ${f.height}` : "4 / 3";
+  return (
+    <article
+      className="card card-image"
+      style={style}
+      tabIndex={0}
+      onClick={() => onOpen(item.id)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") onOpen(item.id);
+      }}
+    >
+      <div className="image-frame" style={{ aspectRatio: ratio }}>
+        {src && <img src={src} alt={item.summary ?? item.title ?? ""} loading="lazy" />}
+      </div>
+      <div className="image-meta">
+        <div className="card-head" style={{ marginBottom: 6 }}>
+          <div className="card-meta">
+            <div className="card-author">
+              <RichText text={item.title ?? "画像"} terms={terms} />
+            </div>
+            <div className="card-sub">
+              {[item.siteName, f?.width && f?.height ? `${f.width}×${f.height}` : null, relativeTime(item.publishedAt ?? item.savedAt)]
+                .filter(Boolean)
+                .join(" · ")}
+            </div>
+          </div>
+          <Sources item={item} />
+        </div>
+        {item.summary ? (
+          <div className="card-summary" style={{ marginTop: 4 }}>
+            <Sparkles />
+            <span>{item.summary}</span>
+          </div>
+        ) : (
+          !item.aiTaggedAt && <div className="card-sub">仕分け待ち</div>
+        )}
+        {item.tags.length > 0 && (
+          <div className="card-foot">
+            <TagChips tags={item.tags} active={activeTags} onTag={onTag} />
+          </div>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function ItemCardInner(props: Props) {
+  if (props.item.kind === "image") return <ImageCard {...props} />;
+  return <PostCard {...props} />;
+}
+
+function PostCard({ item, terms = [], activeTags, onOpen, onTag, style }: Props) {
   const isArticle = item.kind === "article";
   const likes = item.metrics?.like_count;
   const cover = isArticle ? mediaSrc(item.imageLocal, item.imageUrl) : undefined;

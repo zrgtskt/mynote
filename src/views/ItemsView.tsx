@@ -13,6 +13,7 @@ const FILTER_TITLES: Record<Filter, string> = {
   bookmarked: "ブックマーク",
   tweet: "X のポスト",
   article: "Web 記事",
+  image: "画像",
   manual: "手動で追加",
   untagged: "タグなし",
 };

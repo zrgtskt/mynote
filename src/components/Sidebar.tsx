@@ -1,4 +1,4 @@
-import { AtSign, Bookmark, Heart, Inbox, LayoutGrid, Link2, MessageSquareText, Newspaper, Settings as SettingsIcon, Sparkles, Tags } from "lucide-react";
+import { AtSign, Bookmark, Heart, Image as ImageIcon, Inbox, LayoutGrid, Link2, MessageSquareText, Newspaper, Settings as SettingsIcon, Sparkles, Tags } from "lucide-react";
 import type { ReactNode } from "react";
 import { mediaSrc } from "../api";
 import { relativeTime } from "../lib/format";
@@ -53,6 +53,7 @@ export function Sidebar({ view, filter, activeTags, hasQuery, stats, tags, setti
         <NavItem icon={<Bookmark size={17} />} label="ブックマーク" count={stats?.bookmarked} active={isFilter("bookmarked")} onClick={() => onFilter("bookmarked")} />
         <NavItem icon={<MessageSquareText size={17} />} label="ポスト" count={stats?.tweets} active={isFilter("tweet")} onClick={() => onFilter("tweet")} />
         <NavItem icon={<Newspaper size={17} />} label="Web 記事" count={stats?.articles} active={isFilter("article")} onClick={() => onFilter("article")} />
+        <NavItem icon={<ImageIcon size={17} />} label="画像" count={stats?.images} active={isFilter("image")} onClick={() => onFilter("image")} />
         <NavItem icon={<Link2 size={17} />} label="手動で追加" count={stats?.manual} active={isFilter("manual")} onClick={() => onFilter("manual")} />
         <NavItem icon={<Inbox size={17} />} label="タグなし" count={stats?.untagged} active={isFilter("untagged")} onClick={() => onFilter("untagged")} />
 

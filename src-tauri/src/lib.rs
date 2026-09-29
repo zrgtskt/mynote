@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod core;
 mod db;
+mod images;
 mod models;
 mod tagger;
 mod x_api;
@@ -47,8 +48,10 @@ pub fn run() {
                     let _ = handle.emit("progress", p);
                 }),
             )?);
-            // 保存した画像を画面から読めるようにする
+            // 保存した画像（X・記事の画像と、取り込んだ画像ファイル）を画面から読めるようにする
             app.asset_protocol_scope().allow_directory(&core.media_dir, true)?;
+            std::fs::create_dir_all(core.images_dir())?;
+            app.asset_protocol_scope().allow_directory(core.images_dir(), true)?;
             app.manage(core.clone());
             tauri::async_runtime::spawn(auto_sync_loop(core, app.handle().clone()));
             Ok(())
@@ -68,6 +71,8 @@ pub fn run() {
             commands::delete_tag,
             commands::set_note,
             commands::delete_item,
+            commands::import_image,
+            commands::open_item_file,
             commands::add_url,
             commands::tag_pending,
             commands::count_pending_tags,

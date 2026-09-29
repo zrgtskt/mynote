@@ -169,14 +169,29 @@ pub struct Fetched {
     pub final_url: String,
 }
 
+/// URL の中身。記事のページか、画像ファイルか
+pub enum Resource {
+    Page(Box<Fetched>),
+    Image { bytes: Vec<u8>, final_url: String },
+}
+
+/// 記事のページを取得する（画像ファイルならエラー）
 pub async fn fetch(http: &reqwest::Client, raw_url: &str) -> Result<Fetched> {
+    match fetch_resource(http, raw_url).await? {
+        Resource::Page(f) => Ok(*f),
+        Resource::Image { .. } => bail!("HTML ページではありません（画像ファイル）"),
+    }
+}
+
+/// URL を取得する。画像ファイルならそのままのバイト列を返す。
+pub async fn fetch_resource(http: &reqwest::Client, raw_url: &str) -> Result<Resource> {
     let normalized = normalize_url(raw_url)?;
     let resp = http
         .get(&normalized)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
         .header(
             reqwest::header::ACCEPT,
-            "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+            "text/html,application/xhtml+xml;q=0.9,image/*;q=0.8,*/*;q=0.5",
         )
         .header(reqwest::header::ACCEPT_LANGUAGE, "ja,en;q=0.8")
         .timeout(Duration::from_secs(30))
@@ -193,21 +208,29 @@ pub async fn fetch(http: &reqwest::Client, raw_url: &str) -> Result<Fetched> {
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    if let Some(ct) = &content_type {
-        let ct = ct.to_ascii_lowercase();
-        if !(ct.contains("html") || ct.contains("xml") || ct.starts_with("text/")) {
-            bail!("HTML ページではありません（{ct}）");
+    let ct = content_type.as_deref().unwrap_or("").to_ascii_lowercase();
+    if ct.starts_with("image/") {
+        let bytes = resp.bytes().await?;
+        if bytes.len() > crate::images::MAX_IMPORT_BYTES {
+            bail!("画像が大きすぎます（{} MB）", bytes.len() / 1024 / 1024);
         }
+        return Ok(Resource::Image {
+            bytes: bytes.to_vec(),
+            final_url,
+        });
+    }
+    if !(ct.is_empty() || ct.contains("html") || ct.contains("xml") || ct.starts_with("text/")) {
+        bail!("HTML ページではありません（{ct}）");
     }
     let bytes = resp.bytes().await?;
     if bytes.len() > MAX_BYTES {
         bail!("ページが大きすぎます（{} MB）", bytes.len() / 1024 / 1024);
     }
     let html = decode_html(&bytes, content_type.as_deref());
-    Ok(Fetched {
+    Ok(Resource::Page(Box::new(Fetched {
         item: extract(&html, &final_url, &normalized),
         final_url,
-    })
+    })))
 }
 
 #[cfg(test)]

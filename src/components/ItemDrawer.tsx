@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BookOpen, Check, ExternalLink, Heart, LoaderCircle, MessageSquareText, Newspaper, Repeat2, RotateCw, Sparkles, StickyNote, Tag, Trash2, X } from "lucide-react";
+import { BookOpen, Check, Copy, ExternalLink, FileText, FolderOpen, Heart, Image as ImageIcon, LoaderCircle, MessageSquareText, Newspaper, Repeat2, RotateCw, Sparkles, StickyNote, Tag, Trash2, X } from "lucide-react";
 import { api, errorMessage, mediaSrc } from "../api";
 import { compactNumber, hostOf, longDate } from "../lib/format";
 import type { ItemDetail, TagCount } from "../types";
@@ -133,6 +133,28 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
   };
 
   const isArticle = item?.kind === "article";
+  const isImage = item?.kind === "image";
+  const isTweet = item?.kind === "tweet";
+  const hasWebUrl = !!item?.url && /^https?:\/\//.test(item.url);
+
+  const openFile = () => {
+    if (item) api.openItemFile(item.id).catch((e) => toast("error", errorMessage(e)));
+  };
+
+  const copyText = (text: string) => {
+    navigator.clipboard?.writeText(text).then(
+      () => toast("success", "コピーしました"),
+      () => toast("error", "コピーできませんでした"),
+    );
+  };
+
+  const fileMeta = (() => {
+    const f = item?.file;
+    if (!f) return "";
+    const size = f.size ? (f.size >= 1024 * 1024 ? `${(f.size / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(f.size / 1024))} KB`) : null;
+    const type = f.mime?.replace("image/", "").toUpperCase();
+    return [f.width && f.height ? `${f.width}×${f.height}` : null, type, size, item?.siteName ? `取得元: ${item.siteName}` : null].filter(Boolean).join(" · ");
+  })();
 
   return (
     <>
@@ -141,17 +163,24 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
         <div className="drawer-bar">
           {item && (
             <span className={`kind-badge ${item.kind}`}>
-              {isArticle ? <Newspaper /> : <MessageSquareText />}
-              {isArticle ? "Web 記事" : "X のポスト"}
+              {isArticle ? <Newspaper /> : isImage ? <ImageIcon /> : <MessageSquareText />}
+              {isArticle ? "Web 記事" : isImage ? "画像" : "X のポスト"}
             </span>
           )}
           {item && <Sources item={item} />}
           <span style={{ flex: 1 }} />
           {item && (
             <>
-              <button className="btn btn-sm btn-ghost" onClick={() => openExternal(item.url)}>
-                <ExternalLink /> 元のページ
-              </button>
+              {isImage && (
+                <button className="btn btn-sm btn-ghost" onClick={openFile} title="パソコンの既定のアプリで開く">
+                  <FolderOpen /> ファイルを開く
+                </button>
+              )}
+              {hasWebUrl && (
+                <button className="btn btn-sm btn-ghost" onClick={() => openExternal(item.url)}>
+                  <ExternalLink /> 元のページ
+                </button>
+              )}
               {canRetag && (
                 <button className="btn btn-sm btn-ghost" onClick={retag} disabled={retagging} title="Claude でタグと要約を付け直す">
                   {retagging ? <LoaderCircle className="spin" /> : <Sparkles />} AI タグ
@@ -177,6 +206,20 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
             </div>
           ) : (
             <>
+              {isImage && (
+                <>
+                  <h1 className="detail-title" style={{ fontSize: 20 }}>
+                    {item.title ?? "画像"}
+                  </h1>
+                  <div className="card-sub" style={{ marginBottom: 14 }}>
+                    {fileMeta}
+                    {item.publishedAt ? ` · ${longDate(item.publishedAt)}` : ""}
+                  </div>
+                  <img className="detail-image" src={mediaSrc(item.file?.path, null)} alt={item.summary ?? ""} onDoubleClick={openFile} title="ダブルクリックで既定のアプリで開く" />
+                </>
+              )}
+
+              {!isImage && (
               <div className="card-head" style={{ marginBottom: 14 }}>
                 {isArticle ? (
                   <SiteBadge name={item.siteName ?? hostOf(item.url)} />
@@ -193,8 +236,9 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
                   </div>
                 </div>
               </div>
+              )}
 
-              {isArticle ? (
+              {isImage ? null : isArticle ? (
                 <>
                   <h1 className="detail-title">{item.title ?? item.url}</h1>
                   {mediaSrc(item.imageLocal, item.imageUrl) && <img className="detail-cover" src={mediaSrc(item.imageLocal, item.imageUrl)} alt="" />}
@@ -205,7 +249,7 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
                 </div>
               )}
 
-              {!isArticle && item.media.length > 0 && (
+              {isTweet && item.media.length > 0 && (
                 <div className="detail-media">
                   {item.media.map((m, i) =>
                     m.videoUrl ? (
@@ -217,13 +261,13 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
                 </div>
               )}
 
-              {!isArticle && item.link && (
+              {isTweet && item.link && (
                 <div style={{ cursor: "pointer" }}>
                   <LinkPreview link={item.link} linked={item.linked} onClick={() => openExternal(item.link!.url)} />
                 </div>
               )}
 
-              {!isArticle && item.metrics && (
+              {isTweet && item.metrics && (
                 <div className="inline" style={{ marginTop: 14, gap: 16 }}>
                   {item.metrics.like_count != null && (
                     <span className="metric">
@@ -248,6 +292,32 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
                 </div>
               )}
 
+              {isImage && item.text && (
+                <div className="detail-section">
+                  <div className="section-label">
+                    <FileText /> 画像内の文字
+                    <span style={{ flex: 1 }} />
+                    <button className="btn btn-sm btn-ghost" onClick={() => copyText(item.text)}>
+                      <Copy /> コピー
+                    </button>
+                  </div>
+                  <div className="ocr-box">{item.text}</div>
+                </div>
+              )}
+
+              {isImage && !item.aiTaggedAt && (
+                <div className="detail-section">
+                  <div className="callout">
+                    <Sparkles />
+                    <div>
+                      {canRetag
+                        ? "まだ仕分けしていません。自動タグ付けがオンなら、取り込み後に Claude がタグ・説明・画像内の文字を付けます（上の「AI タグ」ですぐ実行できます）。"
+                        : "設定で Anthropic の API キーを入れると、Claude が画像を見てタグ・説明・画像内の文字を付けます。"}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="detail-section">
                 <div className="section-label">
                   <Tag /> タグ
@@ -268,7 +338,7 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
                 />
               </div>
 
-              {!isArticle && item.link && (
+              {isTweet && item.link && (
                 <div className="detail-section">
                   <div className="section-label">
                     <BookOpen /> 紹介先の記事

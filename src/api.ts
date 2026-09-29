@@ -69,6 +69,8 @@ export const api = {
   setNote: (id: number, note: string) => call<void>("set_note", { id, note }),
   deleteItem: (id: number) => call<void>("delete_item", { id }),
   addUrl: (url: string) => call<Item>("add_url", { url }),
+  importImage: (name: string, data: string, modifiedAt?: string) => call<Item>("import_image", { name, data, modifiedAt }),
+  openItemFile: (id: number) => call<void>("open_item_file", { id }),
   tagPending: (limit?: number) => call<TagReport>("tag_pending", { limit }),
   countPendingTags: () => call<number>("count_pending_tags"),
   retagItem: (id: number) => call<ItemDetail>("retag_item", { id }),
@@ -91,7 +93,7 @@ export async function onItemsChanged(handler: () => void): Promise<Unlisten> {
 
 /** ローカルに保存済みの画像があればそれを、なければ元の URL を使う */
 export function mediaSrc(local?: string | null, remote?: string | null): string | undefined {
-  if (local && fileSrcFn && isTauri()) return fileSrcFn(local);
+  if (local && fileSrcFn) return fileSrcFn(local);
   return remote ?? undefined;
 }
 
