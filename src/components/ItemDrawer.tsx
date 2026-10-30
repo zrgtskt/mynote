@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { BookOpen, Check, Copy, ExternalLink, FileText, FolderOpen, Heart, Image as ImageIcon, LoaderCircle, MessageSquareText, Newspaper, Repeat2, RotateCw, Sparkles, StickyNote, Tag, Trash2, X } from "lucide-react";
-import { api, errorMessage, mediaSrc } from "../api";
+import { api, errorMessage, localizeHtml, mediaSrc } from "../api";
 import { compactNumber, hostOf, longDate } from "../lib/format";
 import type { ItemDetail, TagCount } from "../types";
 import { Avatar, RichText, SiteBadge, openExternal } from "./common";
@@ -360,7 +360,7 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
                       <div className={`linked-body${expanded ? " expanded" : ""}`}>
                         {item.linkedHtml ? (
                           // 本文はバックエンドで ammonia によりサニタイズ済み
-                          <div className="prose" dangerouslySetInnerHTML={{ __html: item.linkedHtml }} onClick={openLinksExternally} />
+                          <div className="prose" dangerouslySetInnerHTML={{ __html: localizeHtml(item.linkedHtml, item.localImages) }} onClick={openLinksExternally} />
                         ) : (
                           <div className="detail-text" style={{ fontSize: 15 }}>
                             {item.linkedText}
@@ -412,7 +412,7 @@ export function ItemDrawer({ id, allTags, canRetag, onClose, onChanged, onDelete
                     <div
                       className="prose"
                       // 本文はバックエンドで ammonia によりサニタイズ済み
-                      dangerouslySetInnerHTML={{ __html: item.contentHtml }}
+                      dangerouslySetInnerHTML={{ __html: localizeHtml(item.contentHtml, item.localImages) }}
                       onClick={openLinksExternally}
                     />
                   ) : (

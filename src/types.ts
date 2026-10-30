@@ -79,6 +79,8 @@ export interface Item {
 export interface ItemDetail extends Item {
   contentHtml?: string | null;
   linkedHtml?: string | null;
+  /** 本文中の画像のうちローカルに保存済みのもの（元の URL → パス） */
+  localImages?: Record<string, string>;
   linkedText?: string | null;
 }
 
