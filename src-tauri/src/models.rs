@@ -150,6 +150,8 @@ pub struct ItemDetail {
     /// 紹介先ページの本文（サニタイズ済み HTML とテキスト）
     pub linked_html: Option<String>,
     pub linked_text: Option<String>,
+    /// 本文中の画像のうちローカルに保存済みのもの（元の URL → ファイルのパス）
+    pub local_images: std::collections::HashMap<String, String>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]

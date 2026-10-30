@@ -114,6 +114,34 @@ fn excerpt_from(text: &str) -> Option<String> {
     Some(e)
 }
 
+/// 1 ページから保存する本文画像の上限
+pub const MAX_BODY_IMAGES: usize = 40;
+
+/// サニタイズ済みの本文 HTML から、画像（<img src>）の URL を出てくる順に取り出す
+pub fn body_image_urls(html: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let lower = html.to_ascii_lowercase();
+    let mut pos = 0;
+    while let Some(i) = lower[pos..].find("<img") {
+        let start = pos + i;
+        let end = lower[start..].find('>').map_or(lower.len(), |j| start + j);
+        let tag = &html[start..end];
+        let tag_lower = &lower[start..end];
+        pos = end;
+        let Some(a) = tag_lower.find(" src=\"") else { continue };
+        let value = &tag[a + 6..];
+        let Some(q) = value.find('"') else { continue };
+        let url = value[..q].replace("&amp;", "&");
+        if (url.starts_with("http://") || url.starts_with("https://")) && !out.contains(&url) {
+            out.push(url);
+            if out.len() >= MAX_BODY_IMAGES {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// HTML から記事を組み立てる（ネットワークなしでテストできるよう分けてある）
 pub fn extract(html: &str, page_url: &str, normalized_url: &str) -> NewItem {
     let base = url::Url::parse(page_url).unwrap_or_else(|_| url::Url::parse(normalized_url).unwrap());
@@ -288,6 +316,29 @@ mod tests {
         );
         assert!(html.contains("https://blog.example.com/images/diagram.png"));
         assert!(item.published_at.is_some());
+    }
+
+    #[test]
+    fn collects_body_image_urls() {
+        let item = extract(
+            PAGE,
+            "https://blog.example.com/posts/tauri",
+            "https://blog.example.com/posts/tauri",
+        );
+        assert_eq!(
+            body_image_urls(&item.content_html.unwrap()),
+            vec!["https://blog.example.com/images/diagram.png".to_string()]
+        );
+        let html = r#"<p><img alt="a" src="https://e.com/a.png?w=1&amp;h=2"><IMG SRC="https://e.com/b.jpg"></p>
+<img src="https://e.com/a.png?w=1&amp;h=2"><img src="data:image/png;base64,xx"><img alt="no src">"#;
+        assert_eq!(
+            body_image_urls(html),
+            vec![
+                "https://e.com/a.png?w=1&h=2".to_string(),
+                "https://e.com/b.jpg".to_string()
+            ],
+            "重複・data URL・src なしは除く"
+        );
     }
 
     #[test]

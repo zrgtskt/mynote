@@ -97,6 +97,21 @@ export function mediaSrc(local?: string | null, remote?: string | null): string 
   return remote ?? undefined;
 }
 
+/** 本文 HTML の画像を、ローカルに保存済みのものに差し替える */
+export function localizeHtml(html: string, localImages?: Record<string, string> | null): string {
+  if (!localImages || !fileSrcFn || !Object.keys(localImages).length) return html;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  let changed = false;
+  doc.querySelectorAll("img[src]").forEach((img) => {
+    const local = localImages[img.getAttribute("src") ?? ""];
+    if (!local) return;
+    img.setAttribute("src", fileSrcFn!(local));
+    img.removeAttribute("srcset");
+    changed = true;
+  });
+  return changed ? doc.body.innerHTML : html;
+}
+
 export function errorMessage(e: unknown): string {
   if (typeof e === "string") return e;
   if (e instanceof Error) return e.message;

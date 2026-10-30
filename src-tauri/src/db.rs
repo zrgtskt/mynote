@@ -237,11 +237,18 @@ impl Db {
             )
             .optional()?
             .unwrap_or((None, None));
+        let body_urls: Vec<String> = [&content_html, &linked_html]
+            .into_iter()
+            .flatten()
+            .flat_map(|h| crate::article::body_image_urls(h))
+            .collect();
+        let local_images = self.local_media_paths(&body_urls)?;
         Ok(Some(ItemDetail {
             item: items.pop().unwrap(),
             content_html,
             linked_html,
             linked_text,
+            local_images,
         }))
     }
 
@@ -712,10 +719,37 @@ impl Db {
                 urls.push(u.clone());
             }
         }
+        // 記事・紹介先ページの本文中の画像（保存済みのものは除く）
+        let ids: Vec<i64> = items.iter().map(|it| it.id).collect();
+        let mut body: Vec<String> = Vec::new();
+        for html in self.body_htmls(&ids)? {
+            body.extend(crate::article::body_image_urls(&html));
+        }
+        let saved = self.local_media_paths(&body)?;
+        urls.extend(body.into_iter().filter(|u| !saved.contains_key(u)));
         urls.sort();
         urls.dedup();
         urls.truncate(limit);
         Ok(urls)
+    }
+
+    /// アイテム本文と紹介先ページ本文の HTML
+    fn body_htmls(&self, ids: &[i64]) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for chunk in ids.chunks(400) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT content_html FROM items WHERE id IN ({placeholders}) AND content_html IS NOT NULL \
+                 UNION ALL SELECT content_html FROM linked_pages WHERE item_id IN ({placeholders}) AND content_html IS NOT NULL"
+            );
+            let args: Vec<i64> = chunk.iter().chain(chunk.iter()).copied().collect();
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(args.iter()), |r| r.get::<_, String>(0))?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        Ok(out)
     }
 
     /// タグ付けに使うため、アイテムの本文を省略せずに取る
@@ -1483,5 +1517,47 @@ mod tests {
             db.media_urls_to_download(Some(&[id]), 10).unwrap(),
             vec!["https://pbs.twimg.com/a.jpg".to_string()]
         );
+    }
+
+    #[test]
+    fn body_images_are_downloaded_and_mapped() {
+        let mut db = Db::open_in_memory().unwrap();
+        let mut a = article("https://e.com/post", "記事", "本文");
+        a.content_html = Some(r#"<p>図</p><img src="https://e.com/fig.png?w=2&amp;h=1">"#.into());
+        let id = db.upsert_item(&a, SourceFlags::default(), &now_iso()).unwrap().id;
+        let page = NewItem {
+            content_html: Some(r#"<img src="https://other.com/x.jpg">"#.into()),
+            text: "紹介先".into(),
+            ..Default::default()
+        };
+        db.save_linked_page(id, "https://other.com/p", Ok(&page)).unwrap();
+
+        let todo = db.media_urls_to_download(Some(&[id]), 10).unwrap();
+        assert!(
+            todo.contains(&"https://e.com/fig.png?w=2&h=1".to_string()),
+            "記事本文の画像"
+        );
+        assert!(
+            todo.contains(&"https://other.com/x.jpg".to_string()),
+            "紹介先本文の画像"
+        );
+        assert!(db.get_item(id).unwrap().unwrap().local_images.is_empty());
+
+        db.record_media_file("https://e.com/fig.png?w=2&h=1", "/tmp/fig.png", 10)
+            .unwrap();
+        let detail = db.get_item(id).unwrap().unwrap();
+        assert_eq!(
+            detail
+                .local_images
+                .get("https://e.com/fig.png?w=2&h=1")
+                .map(String::as_str),
+            Some("/tmp/fig.png")
+        );
+        let todo = db.media_urls_to_download(Some(&[id]), 10).unwrap();
+        assert!(
+            !todo.contains(&"https://e.com/fig.png?w=2&h=1".to_string()),
+            "保存済みは取り直さない"
+        );
+        assert!(todo.contains(&"https://other.com/x.jpg".to_string()));
     }
 }
